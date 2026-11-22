@@ -1,14 +1,16 @@
-# Quickstart — Validação planejada
+# Quickstart — Build e validação local
 
-Este guia será executável após `$speckit-implement`. O projeto ainda contém somente os
-artefatos de especificação e planejamento; os comandos abaixo não foram executados como teste.
+Implementação disponível. Resultados efetivamente verificados e limitações estão em
+[validation.md](validation.md); os cenários abaixo podem ser repetidos sem usar a base pessoal.
 
 ## Pré-requisitos
 
-Mac Apple Silicon com macOS 14+, Swift 6 e SDK macOS via Command Line Tools ou Xcode.
+Mac Apple Silicon com macOS 14+, Swift 6 e SDK macOS. Neste ambiente, usar Xcode 27.2:
+o Command Line Tools ativo não inclui o plugin SwiftUI requerido pelo SDK atual.
 Para o fixture manual: `sqlite3` e `uuidgen`. Nenhum modelo, conta ou servidor é necessário.
 
 ```sh
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 xcrun swift --version
 xcode-select -p
 ```
@@ -18,8 +20,10 @@ xcode-select -p
 A partir da raiz do projeto:
 
 ```sh
-swift build
-swift test
+export CLANG_MODULE_CACHE_PATH="$PWD/.build/module-cache"
+export SWIFTPM_MODULECACHE_OVERRIDE="$CLANG_MODULE_CACHE_PATH"
+xcrun swift build --disable-sandbox --cache-path .build/cache --manifest-cache local
+xcrun swift test --disable-sandbox --cache-path .build/cache --manifest-cache local
 bash scripts/build-app.sh
 open .build/MeetingRecord.app
 ```
