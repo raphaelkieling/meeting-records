@@ -1,43 +1,66 @@
 import SwiftUI
 
 struct SidebarView: View {
-    @Binding var destination: Destination
+    let destination: Destination
     let state: MeetingLoadState
+    @Binding var editor: RenameSession?
+    let isSaving: Bool
+    let canCreate: Bool
+    let revealID: UUID?
+    let revealVersion: Int
+    let navigate: (Destination) -> Void
+    let create: () -> Void
+    let rename: (UUID) -> Void
+    let save: () -> Void
+    let cancel: () -> Void
     let retry: () -> Void
     @FocusState private var focusedDestination: Destination?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             navigationButton("Home", icon: "house", target: .home)
-            navigationButton("Configurações", icon: "gearshape", target: .settings)
-            Text("Meetings").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                .padding(.top, 16).padding(.horizontal, 8)
+            navigationButton("Settings", icon: "gearshape", target: .settings)
+            HStack {
+                Text("Meetings").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Spacer()
+                Button(action: create) { Image(systemName: "plus").frame(width: 24, height: 24) }
+                    .buttonStyle(.borderless)
+                    .disabled(!canCreate)
+                    .help("Add Meeting")
+                    .accessibilityLabel("Add Meeting")
+            }
+            .padding(.top, 12).padding(.horizontal, 8)
             switch state {
             case .loading:
-                ProgressView("Carregando reuniões…").controlSize(.small).padding(8)
+                ProgressView("Loading meetings…").controlSize(.small).padding(8)
                 Spacer()
             case .failed(let message):
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Não foi possível carregar as reuniões").font(.callout)
+                    Text("Could not load meetings").font(.callout)
                     Text(message).font(.caption).foregroundStyle(.secondary)
-                    Button("Tentar novamente", action: retry)
+                    Button("Try Again", action: retry)
                 }.padding(8)
                 Spacer()
             case .loaded(let meetings) where meetings.isEmpty:
-                Text("Nenhuma reunião").foregroundStyle(.secondary).padding(8)
+                Text("No meetings yet").foregroundStyle(.secondary).padding(8)
                 Spacer()
             case .loaded(let meetings):
                 ScrollViewReader { proxy in
                     ScrollView {
                         VStack(spacing: 4) {
                             ForEach(meetings) { meeting in
-                                navigationButton(meeting.name, icon: "text.bubble", target: .meeting(meeting.id))
-                                    .id(Destination.meeting(meeting.id))
+                                meetingRow(meeting).id(Destination.meeting(meeting.id))
                             }
                         }.padding(2)
                     }
                     .onChange(of: focusedDestination) { _, target in
                         if let target { proxy.scrollTo(target) }
+                    }
+                    .onChange(of: revealVersion) { _, _ in
+                        if let revealID { proxy.scrollTo(Destination.meeting(revealID)) }
+                    }
+                    .onAppear {
+                        if let revealID { proxy.scrollTo(Destination.meeting(revealID)) }
                     }
                 }
             }
@@ -48,6 +71,7 @@ struct SidebarView: View {
         .background(.background.secondary)
         .onAppear { focusedDestination = .home }
         .onMoveCommand { direction in
+            guard editor == nil else { return }
             let meetings: [Meeting]
             if case .loaded(let values) = state { meetings = values } else { meetings = [] }
             let targets: [Destination] = [.home, .settings] + meetings.map { .meeting($0.id) }
@@ -60,8 +84,47 @@ struct SidebarView: View {
         }
     }
 
+    private func meetingRow(_ meeting: Meeting) -> some View {
+        let target = Destination.meeting(meeting.id)
+        return HStack(spacing: 8) {
+            Image(systemName: "text.bubble").accessibilityHidden(true)
+            InlineMeetingName(meeting: meeting, origin: .sidebar, editor: $editor,
+                              isSaving: isSaving, begin: { rename(meeting.id) }, save: save, cancel: cancel)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 8).padding(.vertical, 6)
+        .background(destination == target ? Color.accentColor.opacity(0.16) : .clear,
+                    in: RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6)
+            .stroke(focusedDestination == target && editor == nil ? Color.accentColor : .clear, lineWidth: 2))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if editor?.id != meeting.id {
+                if editor == nil { focusedDestination = target }
+                navigate(target)
+            }
+        }
+        .focusable(editor == nil)
+        .focused($focusedDestination, equals: target)
+        .onKeyPress(.return) { guard editor == nil else { return .ignored }; navigate(target); return .handled }
+        .onKeyPress(.space) { guard editor == nil else { return .ignored }; navigate(target); return .handled }
+        .focusedValue(\.renameMeeting, editor == nil && !isSaving ? { rename(meeting.id) } : nil)
+        .contextMenu { Button("Rename") { rename(meeting.id) } }
+        .accessibilityElement(children: editor?.id == meeting.id ? .contain : .combine)
+        .accessibilityLabel(editor?.id == meeting.id ? "" : meeting.name)
+        .accessibilityAddTraits(destination == target ? [.isSelected] : [])
+        .accessibilityAction {
+            if editor == nil { focusedDestination = target }
+            navigate(target)
+        }
+        .accessibilityAction(named: Text("Rename")) { rename(meeting.id) }
+        .onChange(of: editor == nil) { wasClosed, isClosed in
+            if !wasClosed && isClosed && destination == target { focusedDestination = target }
+        }
+    }
+
     private func navigationButton(_ title: String, icon: String, target: Destination) -> some View {
-        Button { destination = target } label: {
+        Button { navigate(target) } label: {
             Label(title, systemImage: icon)
                 .lineLimit(1).truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -75,10 +138,7 @@ struct SidebarView: View {
         .buttonStyle(.plain)
         .focusable()
         .focused($focusedDestination, equals: target)
-        .onKeyPress(.return) { destination = target; return .handled }
-        .onKeyPress(.space) { destination = target; return .handled }
         .help(title)
-        .accessibilityLabel(title)
         .accessibilityAddTraits(destination == target ? .isSelected : [])
     }
 }

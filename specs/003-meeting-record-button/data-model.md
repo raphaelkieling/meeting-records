@@ -1,0 +1,7 @@
+# Recording Data Model
+
+- **Meeting** — Existing ID and name. Zero or more Recordings. Its first usable Input establishes its source. Existing Meetings open with an empty Inputs list.
+- **Recording** — Stable ID, Meeting ID, start and end dates, and state (`starting → recording → completed` or `interrupted`). Keep an interrupted Recording when usable audio exists. Remove empty starts and omit them from Inputs. Order by start date and ID.
+- **Audio segment** — Recording ID, source (`me` or `other`), start offset on a common monotonic recording timeline, frame count, and relative path. Each source has independent segments. Preserve gaps and overlap using timestamps.
+
+Store audio at `~/Library/Application Support/MeetingRecord/Recordings/<meeting-id>/<recording-id>/<source>/<start-offset>.caf` and metadata in the existing `meetings.sqlite`. Use independently readable PCM clips written as bounded checkpoints, initially about five seconds. Close each temporary file, atomically rename it on the same volume, then register it in SQLite. On launch, reconcile published clips whose SQLite write was interrupted using their source, offset, and readable frame count. Ignore unfinished temporary files, mark unfinished sessions with recoverable audio as interrupted, and make reconciliation safe to repeat. On normal stop, drain pending buffers and publish the partial final clips before marking the Recording complete.

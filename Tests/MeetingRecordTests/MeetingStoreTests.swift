@@ -32,11 +32,11 @@ final class MeetingStoreTests: XCTestCase {
         return sqlite3_column_int(statement, 0)
     }
 
-    func testFreshDatabaseIsEmptyV1() async throws {
+    func testFreshDatabaseIsEmptyV2() async throws {
         let url = try temporaryURL()
         let meetings = try await MeetingStore(databaseURL: url).loadMeetings()
         XCTAssertTrue(meetings.isEmpty)
-        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 1)
+        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 2)
     }
 
     func testThirtyRecordsReopenUnicodeDuplicateNamesAndStableOrder() async throws {
@@ -46,8 +46,8 @@ final class MeetingStoreTests: XCTestCase {
         for i in 1...30 {
             let id = UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", i))!
             let name = i < 3 ? "Reunião 日本語 español" : "Reunião \(i) " + String(repeating: "nome longo ", count: 20)
-            expected.append(try Meeting(id: id, name: name, createdAt: Date(timeIntervalSince1970: Double(i / 2))))
-            try execute("INSERT INTO meetings VALUES ('\(id.uuidString)', '\(name)', \(i / 2))", at: url)
+            expected.append(try Meeting(id: id, name: name, createdAt: Date(timeIntervalSince1970: Double(i / 2)), updatedAt: Date(timeIntervalSince1970: Double(i / 2))))
+            try execute("INSERT INTO meetings VALUES ('\(id.uuidString)', '\(name)', \(i / 2), \(i / 2))", at: url)
         }
         expected.sort {
             $0.createdAt == $1.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.createdAt > $1.createdAt
@@ -72,11 +72,11 @@ final class MeetingStoreTests: XCTestCase {
 
     func testFutureVersionIsPreservedByteForByte() async throws {
         let url = try temporaryURL()
-        try execute("CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES ('preserve'); PRAGMA user_version=2", at: url)
+        try execute("CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES ('preserve'); PRAGMA user_version=3", at: url)
         let original = try Data(contentsOf: url)
         do { _ = try await MeetingStore(databaseURL: url).loadMeetings(); XCTFail("Expected incompatible version") } catch {}
         XCTAssertEqual(try Data(contentsOf: url), original)
-        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 2)
+        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 3)
     }
 
     func testInitializationFailureRollsBackWithoutChangingExistingSchema() async throws {
