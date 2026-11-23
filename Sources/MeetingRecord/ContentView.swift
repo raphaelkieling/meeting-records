@@ -31,7 +31,25 @@ struct ContentView: View {
     @State private var creation: (id: UUID, name: String)?
     @State private var revealID: UUID?
     @State private var revealVersion = 0
-    private let store = MeetingStore()
+    @ObservedObject var recording: RecordingCoordinator
+    @State private var activeTab = MeetingTab.inputs
+    private var store: MeetingStore { recording.store }
+
+    private enum MeetingTab: String, CaseIterable {
+        case inputs = "Inputs"
+        case transcription = "Transcription"
+
+        var icon: String {
+            switch self {
+            case .inputs: "tray"
+            case .transcription: "text.alignleft"
+            }
+        }
+    }
+
+    private var recordingMeetingID: UUID? {
+        if case .recording(let id) = recording.state { id } else { nil }
+    }
 
     private var meetings: [Meeting] {
         if case .loaded(let values) = state { values } else { [] }
@@ -50,11 +68,12 @@ struct ContentView: View {
             SidebarView(
                 destination: destination, state: state, editor: $editor, isSaving: isSaving,
                 canCreate: canCreate, revealID: revealID, revealVersion: revealVersion,
+                recordingMeetingID: recordingMeetingID,
                 navigate: { request(.navigate($0)) }, create: { request(.create) },
                 rename: { request(.rename($0, .sidebar)) }, save: saveRename, cancel: cancelRename,
                 retry: { Task { await loadMeetings() } }
             )
-            Divider()
+            Divider().ignoresSafeArea(.container, edges: .top)
             VStack(alignment: .leading, spacing: 20) {
                 if let meeting = selectedMeeting {
                     InlineMeetingName(meeting: meeting, origin: .header, editor: $editor,
@@ -63,28 +82,39 @@ struct ContentView: View {
                         .font(.largeTitle.bold())
                     VStack(alignment: .leading, spacing: 0) {
                         HStack {
-                            Button {} label: {
-                                Label("Transcription", systemImage: "text.alignleft")
-                                    .labelStyle(.titleAndIcon)
-                                    .padding(.horizontal, 12).padding(.vertical, 8)
+                            ForEach(MeetingTab.allCases, id: \.self) { tab in
+                                Button { activeTab = tab } label: {
+                                    Label(tab.rawValue, systemImage: tab.icon)
+                                        .padding(.horizontal, 12).padding(.vertical, 8)
+                                }
+                                .buttonStyle(.plain)
+                                .background(activeTab == tab ? Color.accentColor.opacity(0.12) : .clear,
+                                            in: RoundedRectangle(cornerRadius: 6))
+                                .accessibilityAddTraits(activeTab == tab ? .isSelected : [])
                             }
-                            .buttonStyle(.plain)
-                            .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
-                            .accessibilityLabel("Transcription")
-                            .accessibilityValue("Selected tab")
-                            .accessibilityAddTraits(.isSelected)
                             Spacer()
                         }
                         .padding(.bottom, 12)
                         Divider()
-                        Text("No transcription yet.")
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 20)
-                        Spacer()
+                        if activeTab == .inputs {
+                            InputsView(meetingID: meeting.id, store: store, revision: recording.revision)
+                                .id(meeting.id)
+                        } else {
+                            Text("No transcription yet.")
+                                .foregroundStyle(.secondary)
+                                .padding(.top, 20)
+                            Spacer()
+                        }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .contentShape(Rectangle())
                     .onTapGesture { if editor != nil { saveRename() } }
+                    .padding(.bottom, 60)
+                    .overlay(alignment: .bottom) {
+                        RecordingControl(state: recording.state, meetingID: meeting.id, levels: recording.levels) {
+                            recording.toggle(for: meeting.id)
+                        }
+                    }
                 } else {
                     Text(destination == .settings ? "Settings" : "Home").font(.largeTitle.bold())
                     Text(destination == .settings ? "Settings will appear here." : "Your meeting workspace.")
@@ -101,11 +131,23 @@ struct ContentView: View {
                     }
                 }
             }
-            .padding(32)
+            .padding(.horizontal, 32)
+            .padding(.top, 0)
+            .padding(.bottom, 40)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .contentShape(Rectangle())
         }
-        .task { await loadMeetings() }
+        .task {
+            await recording.recover()
+            await loadMeetings()
+        }
+        .onChange(of: selectedMeeting?.id) { _, _ in activeTab = .inputs }
+        .alert("Recording", isPresented: Binding(get: { recording.error != nil },
+                                                 set: { if !$0 { recording.error = nil } })) {
+            Button("OK") { recording.error = nil }
+        } message: {
+            Text(recording.error ?? "")
+        }
     }
 
     private func request(_ action: MeetingAction) {
@@ -217,10 +259,16 @@ struct InlineMeetingName: View {
         Group {
             if isEditing {
                 VStack(alignment: .leading, spacing: 6) {
-                    TextField("Meeting name", text: draft)
-                        .textFieldStyle(.roundedBorder)
+                    TextField("Meeting name", text: draft, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .focused($isFocused)
                         .disabled(isSaving)
+                        .onKeyPress(.return) {
+                            save()
+                            return .handled
+                        }
                         .onSubmit(save)
                         .onExitCommand(perform: cancel)
                         .accessibilityLabel("Meeting name")
@@ -236,6 +284,14 @@ struct InlineMeetingName: View {
                                     if isEditing && !isFocused && !isSaving { save() }
                                 }
                             }
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.background, in: RoundedRectangle(cornerRadius: 6))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 6)
+                                .strokeBorder(isFocused ? Color.accentColor : Color.secondary.opacity(0.3))
+                                .allowsHitTesting(false)
                         }
                     if let error = editor?.error {
                         Text(error).font(.caption).foregroundStyle(.red)

@@ -1,12 +1,21 @@
 import SwiftUI
 
+extension Color {
+    static let meetingAccent = Color(red: 0.71, green: 0.13, blue: 0.21)
+}
+
 @main
 struct MeetingRecordApp: App {
+    @StateObject private var recording = RecordingCoordinator()
+
     var body: some Scene {
         Window("Meeting Record", id: "main") {
-            ContentView()
+            ContentView(recording: recording)
                 .frame(minWidth: 720, minHeight: 480)
+                .accentColor(.meetingAccent)
+                .tint(.meetingAccent)
         }
+        .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1000, height: 700)
         .windowResizability(.contentMinSize)
         .commands { MeetingCommands() }

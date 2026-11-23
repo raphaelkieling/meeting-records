@@ -6,7 +6,7 @@ trap 'rm -rf "$fixture"' EXIT
 mkdir -p "$fixture/scripts" "$fixture/Resources" "$fixture/bin" "$fixture/output" "$fixture/.build"
 cp "$project_dir/scripts/build-app.sh" "$fixture/scripts/"
 cp "$project_dir/run" "$fixture/"
-cp "$project_dir/Resources/Info.plist" "$fixture/Resources/"
+cp "$project_dir/Resources/Info.plist" "$project_dir/Resources/Recording.entitlements" "$fixture/Resources/"
 printf '#!/bin/bash\nexit 0\n' > "$fixture/output/MeetingRecord"
 chmod +x "$fixture/output/MeetingRecord"
 export BUILD_SCRIPT_FIXTURE="$fixture"
@@ -25,6 +25,12 @@ set -eu
 [[ -x "$1/Contents/MacOS/MeetingRecord" ]]
 printf 'opened\n' >> "$BUILD_SCRIPT_FIXTURE/calls"
 STUB
+cat > "$fixture/bin/codesign" <<'STUB'
+#!/bin/bash
+set -eu
+[[ "$*" == *'--entitlements Resources/Recording.entitlements'* ]]
+STUB
+chmod +x "$fixture/bin/codesign"
 chmod +x "$fixture/bin/xcrun" "$fixture/bin/open"
 export PATH="$fixture/bin:$PATH"
 /bin/bash "$fixture/run"

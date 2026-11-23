@@ -8,6 +8,7 @@ struct SidebarView: View {
     let canCreate: Bool
     let revealID: UUID?
     let revealVersion: Int
+    let recordingMeetingID: UUID?
     let navigate: (Destination) -> Void
     let create: () -> Void
     let rename: (UUID) -> Void
@@ -66,6 +67,7 @@ struct SidebarView: View {
             }
         }
         .padding(12)
+        .padding(.top, 0)
         .frame(width: 240)
         .frame(maxHeight: .infinity)
         .background(.background.secondary)
@@ -86,11 +88,13 @@ struct SidebarView: View {
 
     private func meetingRow(_ meeting: Meeting) -> some View {
         let target = Destination.meeting(meeting.id)
+        let isRecording = recordingMeetingID == meeting.id
         return HStack(spacing: 8) {
             Image(systemName: "text.bubble").accessibilityHidden(true)
             InlineMeetingName(meeting: meeting, origin: .sidebar, editor: $editor,
                               isSaving: isSaving, begin: { rename(meeting.id) }, save: save, cancel: cancel)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            if isRecording { RecordingIndicator() }
         }
         .padding(.horizontal, 8).padding(.vertical, 6)
         .background(destination == target ? Color.accentColor.opacity(0.16) : .clear,
@@ -112,6 +116,7 @@ struct SidebarView: View {
         .contextMenu { Button("Rename") { rename(meeting.id) } }
         .accessibilityElement(children: editor?.id == meeting.id ? .contain : .combine)
         .accessibilityLabel(editor?.id == meeting.id ? "" : meeting.name)
+        .accessibilityValue(isRecording ? "Recording" : "")
         .accessibilityAddTraits(destination == target ? [.isSelected] : [])
         .accessibilityAction {
             if editor == nil { focusedDestination = target }
