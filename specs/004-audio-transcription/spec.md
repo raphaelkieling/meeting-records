@@ -53,12 +53,27 @@ As a user, I want saved audio and its partial transcript to survive the app clos
 2. **Given** a saved Input has unfinished transcription, **when** the app reopens and transcription is available, **then** processing resumes automatically from the saved progress and the Input shows Pending or Transcribing as appropriate.
 3. **Given** the user wants to continue recording after reopening, **when** they explicitly start recording, **then** a new Input is created and transcribed independently of the recovered Input.
 
+### User Story 4 - Prepare the local transcription model (Priority: P2)
+
+As a user, I want to explicitly download the selected transcription model once, so transcription can run locally and offline afterward.
+
+**Why this priority**: Local processing protects meeting audio and makes the feature usable without an ongoing internet connection.
+
+**Independent Test**: Open the model setup, review its size, start the download, confirm progress and readiness, then disconnect from the internet and transcribe a saved audio Input.
+
+**Acceptance Scenarios**:
+
+1. **Given** the model is not installed, **when** the user opens setup, **then** the app explains that transcription is unavailable and shows the model size before download.
+2. **Given** the user explicitly starts the download, **when** it is in progress, **then** the app shows progress and keeps audio Inputs preserved.
+3. **Given** the model is installed, **when** the user is offline, **then** recordings and saved audio Inputs can be transcribed locally.
+
 ### Edge Cases
 
 - A Meeting may have many Inputs; the unified view includes each transcript once and retains its source label.
 - The transcript may lag behind audio capture; recording continues and the status remains Transcribing until the backlog is processed.
 - The app may close while capturing or while processing saved audio. Saved audio and completed transcript text are retained; capture does not restart automatically, while unfinished transcription resumes automatically after reopening.
 - If transcription cannot start because the required processing capability is unavailable, the audio remains preserved and Pending, and the user receives an explanation.
+- The model download may be unavailable or interrupted; audio Inputs remain preserved and Pending until the local model is ready.
 - An audio Input may come from a recording or, when audio import is available, an imported file. This feature does not add or change the import flow.
 
 ## Requirements *(mandatory)*
@@ -78,12 +93,17 @@ As a user, I want saved audio and its partial transcript to survive the app clos
 - **FR-011**: Starting capture after reopening MUST require an explicit user action and MUST create a separate Input.
 - **FR-012**: Audio Inputs from recording or import MUST use the same per-Input transcription and unified Meeting view. Importing audio itself is outside this feature.
 - **FR-013**: If transcription is unavailable, the system MUST preserve the audio, leave the Input Pending, and explain why transcription has not started.
+- **FR-014**: Transcription MUST run locally after model setup, identify English, Spanish, and Portuguese speech without requiring the user to select a language, and preserve language changes within a Recording.
+- **FR-015**: Transcription MUST NOT interrupt or discard captured audio, and the app MUST remain usable while transcription runs. Model choice MUST favor recognition quality while meeting these capture and responsiveness requirements.
+- **FR-016**: The app MUST identify the selected model and its download size before the user explicitly starts its one-time download, and MUST show download progress.
+- **FR-017**: After the selected model is installed, transcription MUST run without an internet connection and MUST NOT send audio or transcript text to a remote service.
 
 ### Key Entities *(include if feature involves data)*
 
 - **Audio Input**: A recording or imported audio source belonging to a Meeting, with its original audio, order, and transcription status.
 - **Input Transcript**: The transcript text and source passages derived from one Audio Input, updated as processing advances.
 - **Meeting Transcription**: The unified reading view derived from the Meeting's Input Transcripts, preserving source Input, audio-source labels, and timing.
+- **Local Transcription Model**: The selected model installed on the Mac, with setup readiness and download progress.
 
 ## Success Criteria *(mandatory)*
 
@@ -93,6 +113,9 @@ As a user, I want saved audio and its partial transcript to survive the app clos
 - **SC-002**: With 10 audio Inputs, the Transcription view contains every Input's transcript exactly once and lets the user identify the source Input for each passage.
 - **SC-003**: In all tested lifecycle states, each Input's badge matches one of Pending, Transcribing, or Complete and describes its transcription progress.
 - **SC-004**: After closing the app during recording, reopening preserves the saved Input, does not restart capture, resumes unfinished transcription automatically, and creates a separate Input only after the user starts recording again.
+- **SC-005**: A language-quality review using Portuguese, Spanish, English, and mixed-language samples identifies the model with the best transcript quality among candidates that preserve capture and keep the app responsive.
+- **SC-006**: In a 60-minute dual-track recording on the reference Mac, no captured audio is lost to transcription delay and the user can continue navigating the app.
+- **SC-007**: After one explicit model download, users can transcribe a saved Input while disconnected from the internet.
 
 ## Assumptions
 
@@ -101,3 +124,5 @@ As a user, I want saved audio and its partial transcript to survive the app clos
 - A badge reports transcription progress. Whether its audio capture was interrupted remains separate from the three transcription statuses.
 - Audio import is a future Input creation path; this feature transcribes imported audio once an audio Input exists but does not implement import controls.
 - The configured local transcription capability is available for automatic processing. When it is not available, the Input remains Pending and the user is told why.
+- Recognition quality takes priority over minimizing transcription latency, provided capture stays reliable and the app remains usable.
+- One model is selected for this release; users do not choose between multiple transcription engines.
