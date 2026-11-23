@@ -16,6 +16,7 @@ struct SidebarView: View {
     let cancel: () -> Void
     let retry: () -> Void
     @FocusState private var focusedDestination: Destination?
+    @State private var hasMoreMeetingsBelow = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -52,7 +53,22 @@ struct SidebarView: View {
                             ForEach(meetings) { meeting in
                                 meetingRow(meeting).id(Destination.meeting(meeting.id))
                             }
-                        }.padding(2)
+                        }
+                        .padding(2)
+                        .onGeometryChange(for: Bool.self) { geometry in
+                            guard let viewport = geometry.bounds(of: .scrollView) else { return false }
+                            return geometry.frame(in: .scrollView).maxY > viewport.height + 1
+                        } action: { hasMoreMeetingsBelow = $0 }
+                    }
+                    .scrollIndicators(.never, axes: .vertical)
+                    .mask {
+                        VStack(spacing: 0) {
+                            Rectangle()
+                            if hasMoreMeetingsBelow {
+                                LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+                                    .frame(height: 26)
+                            }
+                        }
                     }
                     .onChange(of: focusedDestination) { _, target in
                         if let target { proxy.scrollTo(target) }

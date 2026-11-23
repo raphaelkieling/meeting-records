@@ -27,7 +27,7 @@ Use only this temporary database for fixtures and failure injection. Close and q
 
 ## Rename and recency
 
-1. Rename the oldest row by double-clicking its sidebar name, entering a Unicode name containing an apostrophe, and pressing Enter. Both visible names update, that UUID moves first, and selection stays with it.
+1. Right-click the oldest sidebar row, choose Rename, enter a Unicode name containing an apostrophe, and press Enter. Both visible names update, that UUID moves first, and selection stays with it.
 2. Rename from the main title; click outside to save. Verify the same result and persistence after restart.
 3. Cancel an edit with Escape; commit an unchanged trimmed name; attempt a whitespace-only name. Verify no timestamp/order changes, and the invalid draft remains with a clear error.
 4. While editing, navigate to Home, create a Meeting, or begin another rename. Valid changes save before continuing exactly once; invalid or failed saves retain editor/destination. Cancel abandons the pending action.

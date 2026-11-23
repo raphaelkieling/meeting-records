@@ -4,9 +4,12 @@ struct InputsView: View {
     let meetingID: UUID
     let store: MeetingStore
     let revision: Int
+    @ObservedObject var transcription: TranscriptionCoordinator
+    let openSettings: () -> Void
     @StateObject private var playback = RecordingPlayback()
     @State private var recordings: [Recording]?
     @State private var error: String?
+    @State private var statuses: [UUID: TranscriptStatus] = [:]
 
     private struct LoadKey: Equatable {
         let meetingID: UUID
@@ -23,8 +26,9 @@ struct InputsView: View {
                         Text(playbackError)
                             .foregroundStyle(.red)
                     }
-                    if recordings.isEmpty {
-                        Text("No inputs yet.").foregroundStyle(.secondary)
+                    if !recordings.isEmpty && !transcription.isReady {
+                        Button("Install a model to transcribe audio", action: openSettings)
+                            .buttonStyle(.link)
                     }
                     ForEach(Array(recordings.enumerated()), id: \.element.id) { index, recording in
                         card(for: recording, index: index)
@@ -34,12 +38,32 @@ struct InputsView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 20)
+            .padding(.top, 12)
+            .background(alignment: .topLeading) {
+                MeetingScrollbar().frame(width: 0, height: 0).accessibilityHidden(true)
+            }
+        }
+        .contentMargins(.all, EdgeInsets(top: 0, leading: 0, bottom: 92, trailing: 12), for: .scrollContent)
+        .contentMargins(.vertical, 6, for: .scrollIndicators)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay {
+            if error == nil, recordings?.isEmpty == true {
+                MeetingEmptyState("No inputs yet.", icon: "tray")
+            }
+        }
+        .task(id: transcription.revision) {
+            do {
+                let values = try await store.transcriptStatuses(for: meetingID)
+                guard !Task.isCancelled else { return }
+                statuses = values
+            } catch where !Task.isCancelled {
+                self.error = "Could not load transcription status. \(error.localizedDescription)"
+            } catch {}
         }
         .onDisappear { playback.stop() }
         .task(id: LoadKey(meetingID: meetingID, revision: revision)) {
             do {
-                let values = try await store.recordings(for: meetingID)
+                let values = try await store.recordings(for: meetingID, includeActive: true)
                 guard !Task.isCancelled else { return }
                 recordings = values
                 error = nil
@@ -53,6 +77,8 @@ struct InputsView: View {
 
     private func card(for recording: Recording, index: Int) -> some View {
         let title = "Recording \(index + 1)"
+        let status = statuses[recording.id]?.status ?? .pending
+        let active = recording.endedAt == nil
         let playing = playback.activeID == recording.id
         let action = playing ? "Stop" : "Play"
 
@@ -60,6 +86,17 @@ struct InputsView: View {
             VStack(alignment: .leading, spacing: 5) {
                 Label(title, systemImage: "waveform")
                     .font(.headline)
+                Text(status.rawValue)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 7).padding(.vertical, 3)
+                    .background(.quaternary, in: Capsule())
+                    .accessibilityLabel("Transcription: \(status.rawValue)")
+                if let error = statuses[recording.id]?.error {
+                    Text(error).font(.caption).foregroundStyle(.secondary)
+                    Button("Retry Transcription") { Task { await transcription.retry() } }
+                        .buttonStyle(.link).font(.caption)
+                }
                 if recording.state == .interrupted {
                     Text("Interrupted")
                         .font(.caption)
@@ -75,8 +112,9 @@ struct InputsView: View {
                         .frame(width: 24, height: 24)
                 }
                 .buttonStyle(.bordered)
+                .disabled(active)
                 .accessibilityLabel("\(action) \(title)")
-                .help(action)
+                .help(active ? "Playback is available after recording." : action)
 
                 Text(recording.startedAt.formatted(date: .abbreviated, time: .shortened))
                     .font(.caption)

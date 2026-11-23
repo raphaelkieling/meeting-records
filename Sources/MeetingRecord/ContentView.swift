@@ -32,6 +32,7 @@ struct ContentView: View {
     @State private var revealID: UUID?
     @State private var revealVersion = 0
     @ObservedObject var recording: RecordingCoordinator
+    @ObservedObject var transcription: TranscriptionCoordinator
     @State private var activeTab = MeetingTab.inputs
     private var store: MeetingStore { recording.store }
 
@@ -42,7 +43,7 @@ struct ContentView: View {
         var icon: String {
             switch self {
             case .inputs: "tray"
-            case .transcription: "text.alignleft"
+            case .transcription: "text.bubble"
             }
         }
     }
@@ -81,44 +82,38 @@ struct ContentView: View {
                                       save: saveRename, cancel: cancelRename)
                         .font(.largeTitle.bold())
                     VStack(alignment: .leading, spacing: 0) {
-                        HStack {
-                            ForEach(MeetingTab.allCases, id: \.self) { tab in
-                                Button { activeTab = tab } label: {
-                                    Label(tab.rawValue, systemImage: tab.icon)
-                                        .padding(.horizontal, 12).padding(.vertical, 8)
-                                }
-                                .buttonStyle(.plain)
-                                .background(activeTab == tab ? Color.accentColor.opacity(0.12) : .clear,
-                                            in: RoundedRectangle(cornerRadius: 6))
-                                .accessibilityAddTraits(activeTab == tab ? .isSelected : [])
-                            }
-                            Spacer()
-                        }
-                        .padding(.bottom, 12)
-                        Divider()
+                        meetingTabPicker
+                            .frame(maxWidth: .infinity)
+                            .padding(.bottom, 12)
                         if activeTab == .inputs {
-                            InputsView(meetingID: meeting.id, store: store, revision: recording.revision)
+                            InputsView(meetingID: meeting.id, store: store, revision: recording.revision,
+                                       transcription: transcription,
+                                       openSettings: { request(.navigate(.settings)) })
                                 .id(meeting.id)
                         } else {
-                            Text("No transcription yet.")
-                                .foregroundStyle(.secondary)
-                                .padding(.top, 20)
-                            Spacer()
+                            TranscriptionView(meetingID: meeting.id, store: store,
+                                              recordingRevision: recording.revision, transcription: transcription)
+                                .id(meeting.id)
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .contentShape(Rectangle())
                     .onTapGesture { if editor != nil { saveRename() } }
-                    .padding(.bottom, 60)
                     .overlay(alignment: .bottom) {
-                        RecordingControl(state: recording.state, meetingID: meeting.id, levels: recording.levels) {
+                        RecordingControl(state: recording.state, meetingID: meeting.id, levels: recording.levels,
+                                         modelReady: transcription.isReady,
+                                         openSettings: { request(.navigate(.settings)) }) {
                             recording.toggle(for: meeting.id)
                         }
+                        .padding(.bottom, 12)
                     }
                 } else {
                     Text(destination == .settings ? "Settings" : "Home").font(.largeTitle.bold())
-                    Text(destination == .settings ? "Settings will appear here." : "Your meeting workspace.")
-                        .foregroundStyle(.secondary)
+                    if destination == .settings {
+                        TranscriptionSettingsView(transcription: transcription)
+                    } else {
+                        Text("Your meeting workspace.").foregroundStyle(.secondary)
+                    }
                     Spacer()
                 }
                 if let mutationError {
@@ -132,8 +127,7 @@ struct ContentView: View {
                 }
             }
             .padding(.horizontal, 32)
-            .padding(.top, 0)
-            .padding(.bottom, 40)
+            .padding(.bottom, selectedMeeting == nil ? 20 : 8)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .contentShape(Rectangle())
         }
@@ -148,6 +142,37 @@ struct ContentView: View {
         } message: {
             Text(recording.error ?? "")
         }
+    }
+
+    private var meetingTabPicker: some View {
+        HStack(spacing: 2) {
+            ForEach(MeetingTab.allCases, id: \.self) { tab in
+                let selected = activeTab == tab
+                Button {
+                    activeTab = tab
+                } label: {
+                    Label(tab.rawValue, systemImage: tab.icon)
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(selected ? .primary : .secondary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background {
+                            if selected {
+                                Capsule()
+                                    .fill(Color(nsColor: .controlBackgroundColor))
+                                    .shadow(color: .black.opacity(0.12), radius: 2, y: 1)
+                            }
+                        }
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
+        .padding(3)
+        .background(.quaternary, in: Capsule())
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Meeting views")
     }
 
     private func request(_ action: MeetingAction) {
@@ -302,18 +327,24 @@ struct InlineMeetingName: View {
                     }
                 }
                 .onChange(of: editor?.error) { _, error in if error != nil { isFocused = true } }
-            } else {
-                Text(meeting.name)
-                    .lineLimit(origin == .sidebar ? 1 : 2)
-                    .truncationMode(.tail)
+            } else if origin == .header {
+                name
                     .help(meeting.name + " — Double-click to rename")
                     .contentShape(Rectangle())
                     .onTapGesture(count: 2, perform: begin)
                     .contextMenu { Button("Rename", action: begin) }
                     .accessibilityAction(named: Text("Rename"), begin)
+            } else {
+                name.help(meeting.name)
             }
         }
         .focusable(origin == .header && !isEditing)
         .focusedValue(\.renameMeeting, !isEditing && !isSaving ? begin : nil)
+    }
+
+    private var name: some View {
+        Text(meeting.name)
+            .lineLimit(origin == .sidebar ? 1 : 2)
+            .truncationMode(.tail)
     }
 }

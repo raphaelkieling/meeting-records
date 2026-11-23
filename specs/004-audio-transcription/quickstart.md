@@ -9,13 +9,14 @@
 ## Build and launch
 
 ```sh
-swift test
 ./run
 ```
 
 ## End-to-end scenarios
 
-1. In Settings, review the chosen model and its download size, explicitly download it, and confirm progress and Ready state.
+1. In Settings, choose a transcription model. Confirm the byte count advances during download and the model becomes Active when installation finishes.
+
+   In Recording Permissions, use Set Up Microphone and Open System Settings. For screen and system audio, use the draggable app item or add the app with the + button in System Settings.
 2. Disconnect from the internet. Record a Meeting and confirm transcript text appears during capture. Check that the corresponding Input badge progresses Pending → Transcribing → Complete after stop and backlog drain.
 3. Play back the Meeting's unified Transcription. Confirm each passage appears once, in Input order, with its source Input, Me/Other label, timestamp, and overlap retained.
 4. Record twice in one Meeting. Confirm both Input badges are independent and the Transcription tab contains both results in recording order.
@@ -25,6 +26,6 @@ swift test
 
 ## Model quality and performance review
 
-Use the same corrected sample set for Qwen3-ASR-1.7B and WhisperKit large-v3 candidates. Include Brazilian Portuguese, Spanish, English, language switching, overlap, quiet speech, and background noise. Record WER/CER by language, language-ID accuracy, correction time, timestamp quality, model load time, peak memory, thermal behavior, transcript update delay, real-time factor, queue depth, and audio capture errors. Choose the highest-quality candidate that meets the capture and responsiveness guardrails in [research.md](research.md). Do not commit private audio or full reference transcripts.
+Use the same corrected sample set for Large v3, Small, and Base. Select the installed model in Settings before making each comparison recording. Existing results and in-progress Inputs retain their model. Qwen3-ASR-1.7B remains an external comparison candidate. Include Brazilian Portuguese, Spanish, English, language switching, overlap, quiet speech, and background noise. Record WER/CER by language, language-ID accuracy, correction time, timestamp quality, model load time, peak memory, thermal behavior, transcript update delay, real-time factor, queue depth, and audio capture errors. Choose the highest-quality candidate that meets the capture and responsiveness guardrails in [research.md](research.md). Do not commit private audio or full reference transcripts.
 
 Use a Release build for profiling. Capture Time Profiler and Swift Concurrency Instruments traces while ASR and both tracks are active. Verify inference does not execute on `MainActor`, the AV capture callback queue, or the durable storage actor. See [the data model](data-model.md) and [UI contract](contracts/ui-contract.md) for expected persisted and visible states.

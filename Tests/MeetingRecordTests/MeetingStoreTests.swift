@@ -32,11 +32,11 @@ final class MeetingStoreTests: XCTestCase {
         return sqlite3_column_int(statement, 0)
     }
 
-    func testFreshDatabaseIsEmptyV3() async throws {
+    func testFreshDatabaseIsEmptyV4() async throws {
         let url = try temporaryURL()
         let meetings = try await MeetingStore(databaseURL: url).loadMeetings()
         XCTAssertTrue(meetings.isEmpty)
-        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 3)
+        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 4)
     }
 
     func testThirtyRecordsReopenUnicodeDuplicateNamesAndStableOrder() async throws {
@@ -72,11 +72,11 @@ final class MeetingStoreTests: XCTestCase {
 
     func testFutureVersionIsPreservedByteForByte() async throws {
         let url = try temporaryURL()
-        try execute("CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES ('preserve'); PRAGMA user_version=4", at: url)
+        try execute("CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES ('preserve'); PRAGMA user_version=5", at: url)
         let original = try Data(contentsOf: url)
         do { _ = try await MeetingStore(databaseURL: url).loadMeetings(); XCTFail("Expected incompatible version") } catch {}
         XCTAssertEqual(try Data(contentsOf: url), original)
-        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 4)
+        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 5)
     }
 
     func testInitializationFailureRollsBackWithoutChangingExistingSchema() async throws {

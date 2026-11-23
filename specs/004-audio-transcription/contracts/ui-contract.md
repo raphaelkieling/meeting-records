@@ -19,6 +19,6 @@
 
 ## Model setup
 
-- The setup screen identifies the selected local model and its download size before offering an explicit Download action.
+- Settings identifies each supported local model and its download size before offering an explicit Download action. Select one installed model for new Inputs. The first installed model becomes active.
 - Show download progress and whether the model is ready. Start model downloads only after explicit user action. Never send meeting audio or transcript text to a remote service.
-- Once installed, model inference works offline. When not installed, audio remains intact and Inputs shows Pending with an explanation.
+- Once installed, model inference works offline. Before a model is installed, Record is disabled and offers a route to Settings. Previously saved audio remains intact and unfinished Inputs show Pending with an explanation.

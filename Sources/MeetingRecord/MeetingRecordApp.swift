@@ -10,7 +10,7 @@ struct MeetingRecordApp: App {
 
     var body: some Scene {
         Window("Meeting Record", id: "main") {
-            ContentView(recording: recording)
+            ContentView(recording: recording, transcription: recording.transcription)
                 .frame(minWidth: 720, minHeight: 480)
                 .accentColor(.meetingAccent)
                 .tint(.meetingAccent)

@@ -38,12 +38,14 @@ actor RecordingStorage {
     private let store: MeetingStore
     private let root: URL
     private let recording: Recording
+    private let checkpointPublished: @Sendable () -> Void
     private var checkpoints: [AudioSegment.Source: Checkpoint] = [:]
 
-    init(store: MeetingStore, root: URL, recording: Recording) {
+    init(store: MeetingStore, root: URL, recording: Recording, checkpointPublished: @escaping @Sendable () -> Void = {}) {
         self.store = store
         self.root = root
         self.recording = recording
+        self.checkpointPublished = checkpointPublished
     }
 
     static func recover(store: MeetingStore, root: URL) async throws {
@@ -157,6 +159,7 @@ actor RecordingStorage {
             .joined(separator: "/")
         try await store.registerSegment(AudioSegment(recordingID: recording.id, source: source,
             startOffset: start, frameCount: frames, relativePath: relativePath))
+        checkpointPublished()
     }
 
     private func level(of pcm: AVAudioPCMBuffer) -> Double {

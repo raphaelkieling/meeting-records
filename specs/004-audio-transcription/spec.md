@@ -55,7 +55,7 @@ As a user, I want saved audio and its partial transcript to survive the app clos
 
 ### User Story 4 - Prepare the local transcription model (Priority: P2)
 
-As a user, I want to explicitly download the selected transcription model once, so transcription can run locally and offline afterward.
+As a user, I want to explicitly download and activate local transcription models, so transcription can run locally and offline afterward.
 
 **Why this priority**: Local processing protects meeting audio and makes the feature usable without an ongoing internet connection.
 
@@ -63,7 +63,7 @@ As a user, I want to explicitly download the selected transcription model once, 
 
 **Acceptance Scenarios**:
 
-1. **Given** the model is not installed, **when** the user opens setup, **then** the app explains that transcription is unavailable and shows the model size before download.
+1. **Given** the model is not installed, **when** the user opens setup, **then** the app explains that transcription is unavailable and shows the model options and their sizes before download.
 2. **Given** the user explicitly starts the download, **when** it is in progress, **then** the app shows progress and keeps audio Inputs preserved.
 3. **Given** the model is installed, **when** the user is offline, **then** recordings and saved audio Inputs can be transcribed locally.
 
@@ -125,4 +125,4 @@ As a user, I want to explicitly download the selected transcription model once, 
 - Audio import is a future Input creation path; this feature transcribes imported audio once an audio Input exists but does not implement import controls.
 - The configured local transcription capability is available for automatic processing. When it is not available, the Input remains Pending and the user is told why.
 - Recognition quality takes priority over minimizing transcription latency, provided capture stays reliable and the app remains usable.
-- One model is selected for this release; users do not choose between multiple transcription engines.
+- Settings offers Whisper Large v3, Small, and Base through one local engine. Large v3 is suggested first. A new recording requires an installed active model. An Input retains its model once it has saved transcription progress.

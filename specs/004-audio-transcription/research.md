@@ -4,9 +4,13 @@
 **Reference machine**: Apple M4 Max, 14 CPU cores, 36 GB unified memory, macOS 27.2.1.  
 **Project compatibility floor**: macOS 14 in `Package.swift`.
 
-## Decision: Select the model through a quality-first local benchmark
+## Implementation decision
 
-Do not claim a universally best model from public leaderboards. Benchmark the strongest practical candidates on the reference Mac and choose one production model. Rank transcript quality first across Brazilian Portuguese, Spanish, English, and language switching inside a recording. A candidate is eligible only if it meets the local, offline, durability, and responsiveness constraints in this plan.
+The local catalog pins WhisperKit 0.15.0 and three multilingual assets (Large v3, Small, Base). Large v3 is the suggested starting point. The [asset manifest](../../Sources/MeetingRecord/TranscriptionModels.swift) pins the Core ML and tokenizer revisions and records size metadata from the repositories. No benchmark results have been recorded. Model comparison and performance profiling are deferred until the app is ready for hands-on validation.
+
+## Deferred quality benchmark
+
+Do not claim a universally best model from public leaderboards. Benchmark the strongest practical candidates on the reference Mac and inform the default model choice. Rank transcript quality first across Brazilian Portuguese, Spanish, English, and language switching inside a recording. A candidate is eligible only if it meets the local, offline, durability, and responsiveness constraints in this plan.
 
 The benchmark set must use consented real meeting audio with corrected reference transcripts. Keep those recordings outside the repository. Include both Me and Other tracks, overlap, quiet speech, background noise, and language changes. Give Brazilian Portuguese, Spanish, English, and mixed-language clips equal weight when calculating transcript quality. Record word error rate by language, character error rate, language identification, correction effort, timestamps, load and peak memory, processing time, backlog growth, and capture overruns. Vendor-published metrics inform which models to compare, but do not decide the winner.
 

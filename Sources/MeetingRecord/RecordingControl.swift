@@ -5,12 +5,15 @@ struct RecordingControl: View {
     let state: RecordingCoordinator.State
     let meetingID: UUID
     let levels: CurrentValueSubject<Double, Never>
+    let modelReady: Bool
+    let openSettings: () -> Void
     let action: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var level = 0.0
 
     private var isRecording: Bool { state == .recording(meetingID) }
     private var isWorking: Bool { state == .starting(meetingID) || state == .finishing(meetingID) }
+    private var needsModel: Bool { state == .idle && !modelReady }
     private var blocked: Bool { state.meetingID.map { $0 != meetingID } ?? false }
     private var label: String {
         if isRecording { return "Stop Recording" }
@@ -41,26 +44,32 @@ struct RecordingControl: View {
                         } else {
                             Image(systemName: isRecording ? "stop.fill" : "circle.fill")
                                 .font(.system(size: 17, weight: .semibold))
-                                .foregroundStyle(blocked ? Color.secondary : .white)
+                                .foregroundStyle((blocked || needsModel) ? Color.secondary : .white)
                         }
                     }
                     .frame(width: 50, height: 50)
                     .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
-                .focusable(!isWorking && !blocked)
-                .disabled(isWorking || blocked)
+                .focusable(!isWorking && !blocked && !needsModel)
+                .disabled(isWorking || blocked || needsModel)
                 .accessibilityLabel(label)
-                .help(label)
+                .help(needsModel ? "Install a transcription model to record." : label)
             }
-            .background(blocked ? Color(nsColor: .controlBackgroundColor)
+            .background((blocked || needsModel) ? Color(nsColor: .controlBackgroundColor)
                         : isRecording ? Color(white: 0.15) : .meetingAccent, in: Capsule())
             .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
-            Text("Another Meeting is recording or finishing.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .opacity(blocked ? 1 : 0)
-                .accessibilityHidden(!blocked)
+            if needsModel {
+                Button("Set up transcription in Settings", action: openSettings)
+                    .buttonStyle(.link)
+                    .font(.caption)
+            } else {
+                Text("Another Meeting is recording or finishing.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .opacity(blocked ? 1 : 0)
+                    .accessibilityHidden(!blocked)
+            }
         }
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.19), value: isRecording)
         .onReceive(levels) { next in

@@ -44,14 +44,14 @@ Persisted text derived from a bounded section of one audio source.
 - `audioSource`: `Me`, `Other`, or the available source label for imported audio.
 - `startOffset` / `endOffset`: Time within the source Input.
 - `text`: Current recognized words.
-- `revisionState`: Provisional or final; a model may replace the latest provisional segment as more context arrives.
+- `revisionState`: This adapter emits finalized results per completed checkpoint. An adapter that emits provisional text may replace its latest segment as more context arrives.
 - `sequence`: Stable ordering when timestamps are equal or overlap.
 
 Segments from Me and Other may overlap. Within one Input, the unified view orders them by start offset, retaining both passages. The Meeting view concatenates Input results in existing Input order; it does not re-transcribe or store a duplicate combined copy.
 
 ## Local Transcription Model
 
-The single model selected for this release.
+One downloadable asset in the local catalog. Settings tracks one active selection. Inputs with saved progress retain their installed model version.
 
 - `modelID` / `version`: Exact asset used for processing.
 - `assetLocation`: Local model bundle after installation.

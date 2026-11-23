@@ -8,7 +8,7 @@ Meeting rows remain compact, single-line, truncated with full-name help, UUID-se
 
 ## Inline rename at both locations
 
-Double click the sidebar name or the main title to replace that text with a native single-line field. The current name becomes the draft and the field gains focus. Expose "Meeting name" as its accessible label, with help "Enter to save. Escape to cancel." Provide a keyboard-accessible Rename context action on the main title as well.
+Choose Rename from the sidebar row’s context menu or double-click the main title to replace that text with a native field. The current name becomes the draft and the field gains focus. Expose "Meeting name" as its accessible label, with help "Enter to save. Escape to cancel." Provide a keyboard-accessible Rename context action on the main title as well.
 
 Enter or leaving the field commits trimmed, changed input. Escape cancels. Blank input shows "Enter a meeting name." and remains editable. An embedded NUL is rejected as invalid name input. Unchanged normalized input closes editing with no save or recency update. Unicode and duplicate names are accepted.
 

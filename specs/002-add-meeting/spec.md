@@ -50,7 +50,7 @@ As a user, I want Meetings ordered by their latest saved change so I can quickly
 
 ### User Story 3 - Rename a Meeting in Place (Priority: P1)
 
-As a user, I want to double-click a Meeting name in the sidebar or its title at the top of the main content to rename it without opening a separate form.
+As a user, I want to rename a Meeting in place through its sidebar context menu or by double-clicking its main title.
 
 **Why this priority**: An automatically named Meeting needs an easy way to become recognizable.
 
@@ -58,7 +58,7 @@ As a user, I want to double-click a Meeting name in the sidebar or its title at 
 
 **Acceptance Scenarios**:
 
-1. **Given** a Meeting row or an open Meeting title, **When** the user double-clicks its name, **Then** that name becomes an inline text field with keyboard focus; double-clicking a sidebar name also selects that Meeting.
+1. **Given** a Meeting row or an open Meeting title, **When** the user chooses Rename from the row’s context menu or double-clicks the main title, **Then** the corresponding name becomes a focused inline text field. A single click on a sidebar row selects the Meeting immediately.
 2. **Given** an edited name, **When** the user presses Enter or leaves the field, **Then** surrounding whitespace is trimmed and a non-empty changed name is saved; both locations show the new name, the Meeting moves to the top, and its identity and selection remain intact.
 3. **Given** an edit in progress, **When** the user presses Escape, **Then** the saved name and update time remain unchanged.
 4. **Given** a blank or whitespace-only draft, **When** the user attempts to save, **Then** the app explains that a name is required and retains the draft for correction without changing the saved name or recency.
@@ -110,7 +110,7 @@ As a user, I want an open Meeting to show a Transcription tab with an icon so I 
 - **FR-010**: Existing empty-list, scrolling, long-name, and navigation behavior MUST remain usable as Meetings are added. Home MUST remain the initial destination on app launch.
 - **FR-011**: Meetings lacking historical update information MUST receive a stable fallback position that does not change on each launch; subsequent successful updates MUST make them participate in the same recency ordering as other Meetings.
 
-- **FR-012**: Users MUST be able to rename a Meeting by double-clicking its sidebar name or the main title. A keyboard-accessible Rename action MUST expose the same flow at both locations.
+- **FR-012**: Users MUST be able to rename a Meeting from its sidebar context menu or by double-clicking the main title. A keyboard-accessible Rename action MUST expose the same flow at both locations.
 - **FR-013**: Inline rename MUST trim surrounding whitespace, reject empty names, save on Enter or leaving the field, and cancel on Escape. Unchanged names MUST NOT update recency. Duplicate names and Unicode MUST be supported.
 - **FR-014**: A successful rename MUST update both displayed names and recency while preserving Meeting identity and selection. Validation or save failure MUST retain the draft with an understandable error and preserve saved data and order.
 - **FR-015**: Each open Meeting MUST display its title above exactly one selected tab labeled "Transcription" with a visible icon. Empty Meetings MUST show "No transcription yet." within that tab. No additional tabs or transcription processing are included.

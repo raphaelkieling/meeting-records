@@ -25,6 +25,11 @@ trap 'rm -rf "$staging"' EXIT
 mkdir -p "$staging/Contents/MacOS"
 cp Resources/Info.plist "$staging/Contents/Info.plist"
 cp "$bin_path/MeetingRecord" "$staging/Contents/MacOS/MeetingRecord"
+mkdir -p "$staging/Contents/Resources"
+for resources in "$bin_path"/*.bundle; do
+  [[ -d "$resources" ]] || continue
+  cp -R "$resources" "$staging/Contents/Resources/"
+done
 plutil -lint "$staging/Contents/Info.plist"
 codesign --force --sign - --entitlements Resources/Recording.entitlements "$staging"
 mv "$staging" "$bundle"

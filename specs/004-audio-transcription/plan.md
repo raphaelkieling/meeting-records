@@ -6,15 +6,15 @@
 
 ## Summary
 
-Add quality-first, offline transcription for each audio Input and present the results as one Meeting transcription. The model is selected by a local quality/performance bake-off between Qwen3-ASR-1.7B and WhisperKit with Whisper large-v3; ship only the winning model. Persisted audio chunks feed a bounded background transcription pipeline so capture, durable writes, and UI remain responsive. Add per-Input transcript state and segments, explicit one-time model download, recovery after app closure, and the unified Transcription view.
+Add quality-first, offline transcription for each audio Input and present the results as one Meeting transcription. Use one WhisperKit runtime with selectable Large v3, Small, and Base assets for later validation. Persisted audio chunks feed a bounded background transcription pipeline so capture, durable writes, and UI remain responsive. Add per-Input transcript state and segments, explicit one-time model download, recovery after app closure, and the unified Transcription view.
 
 ## Technical Context
 
 **Language/Version**: Swift 6, SwiftUI; the package currently targets macOS 14.
 
-**Primary Dependencies**: Existing AVFoundation, ScreenCaptureKit, Swift Concurrency, and SQLite. Add one local ASR runtime after the model bake-off; do not ship both engines.
+**Primary Dependencies**: Existing AVFoundation, ScreenCaptureKit, Swift Concurrency, and SQLite. Use WhisperKit 0.15.0 for local ASR.
 
-**Storage**: Existing SQLite schema v3 for Meetings, Recordings, and Audio Segments; local `.caf` checkpoints in Application Support. Add persisted per-Input transcription jobs and transcript segments. Store the selected model bundle locally outside the database.
+**Storage**: Existing SQLite schema v3 for Meetings, Recordings, and Audio Segments; local `.caf` checkpoints in Application Support. Add persisted per-Input transcription jobs and transcript segments. Store installed model bundles locally outside the database.
 
 **Testing**: Existing XCTest suite with new storage and pipeline coverage, corrected local speech samples for a manual quality benchmark, native UI validation, and Release-build Instruments profiling.
 
@@ -44,15 +44,13 @@ No gate violations identified.
 
 ### Model selection
 
-The model requirement is quality-first, not a preference for the model with the lowest latency. Compare Qwen3-ASR-1.7B, the strongest multilingual quality challenger found, with WhisperKit's large-v3 Swift/Core ML path. Measure both against the same corrected pt-BR, es, en, mixed-language, noisy, overlapping, Me/Other recordings. Choose the model with the best transcript quality that also meets local operation, timestamp/source attribution, capture durability, and responsiveness constraints. If quality is close, prefer the model with the simpler supported Swift integration. Ship one engine and one model only. Do not choose from vendor scores alone; findings and constraints are in [research.md](research.md).
-
-If neither candidate can provide accurate timestamps, language switching, and reliable local inference on the current macOS 14 floor, record the incompatibility before adding a dependency or changing the supported OS. Do not silently raise the deployment floor.
+Offer Whisper Large v3 (suggested), Small, and Base in Settings. Downloads are explicit and the active model is used for new Inputs and saved Inputs that have not started. Inputs with saved progress retain their original model version when they resume. Compare quality and performance on the reference Mac after implementation. The evaluation does not gate development. See [research.md](research.md) for the asset pins and candidate background.
 
 ### Concurrency and capture protection
 
 Reuse `RecordingCapture`'s ordered serial callback queue, `RecordingStorage` actor, bounded sample stream, and SQLite actors. Do not execute model inference on `MainActor`, the AV capture callback queue, or the durable storage actor.
 
-Publish a checkpoint to disk first, then enqueue its file reference into a bounded transcription queue. Run inference in an isolated background worker coordinated with Swift Concurrency. Keep chunks ordered within each Input and audio source. Start with one loaded model instance and a bounded inference worker; let Core ML or the selected runtime use its supported compute devices. Scale concurrency only when Release profiling proves it improves update delay without capture overruns, unbounded memory, or duplicated work. If work backs up, keep the source audio durable, expose Pending/Transcribing state, and drain the persisted backlog after capture.
+Publish a checkpoint to disk first, then signal a single background worker through a coalescing notification. The worker pulls one eligible checkpoint from SQLite at a time, favoring the active Input. Run inference in an isolated background worker coordinated with Swift Concurrency. Keep chunks ordered within each Input and audio source. Start with one loaded model instance and a bounded inference worker; let Core ML or the selected runtime use its supported compute devices. Scale concurrency only when Release profiling proves it improves update delay without capture overruns, unbounded memory, or duplicated work. If work backs up, keep the source audio durable, expose Pending/Transcribing state, and drain the persisted backlog after capture.
 
 The existing Inputs query excludes an open Recording. Extend it so the active Input appears with its Pending/Transcribing badge while recording. Closing the app ends capture; recovery finalizes that Input as interrupted and resumes only unfinished transcription from its saved checkpoint.
 
@@ -106,11 +104,11 @@ Tests/MeetingRecordTests/
 
 ## Delivery Order
 
-1. **Select model** — Establish the corrected multilingual sample set; benchmark Qwen3-ASR-1.7B and WhisperKit large-v3 on the reference Mac. Verify offline packaging, timestamps, language switching, load/peak memory, and capture safety. Record the winner and exact version in `research.md` before locking its package and model assets.
+1. **Pin runtime and assets** — Pin WhisperKit and the selectable model assets.
 2. **Persist transcript state** — Add the SQLite migration, per-Input job/status, timestamped source segments, provisional replacement, idempotent checkpoint writes, and resume offsets. Preserve existing Recording rows and clips.
 3. **Build the isolated pipeline** — Publish active Input state, enqueue only durable checkpoints, run bounded background inference, persist progress, resume unfinished work after launch, and finalize status after all audio is processed.
 4. **Integrate setup and UI** — Add explicit model download size/progress/readiness in Settings, add the status badge to existing Inputs rows, and render the unified live transcript in the Transcription tab.
-5. **Validate and tune** — Run XCTest and native scenarios, repeat the model scorecard after integration, and profile a 60-minute dual-track Release run with Instruments. Tune chunk cadence, QoS, compute units, and bounded worker count from evidence; verify offline operation and app-closure recovery.
+5. **Validate and tune** — Run the native scenarios and model scorecard after integration, and profile a 60-minute dual-track Release run with Instruments. Tune chunk cadence, QoS, compute units, and bounded worker count from evidence; verify offline operation and app-closure recovery.
 
 See [research](research.md), [data model](data-model.md), [UI contract](contracts/ui-contract.md), and [quickstart](quickstart.md).
 

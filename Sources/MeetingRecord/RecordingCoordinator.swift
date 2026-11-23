@@ -22,7 +22,14 @@ final class RecordingCoordinator: ObservableObject {
         let lock: RecordingFileLock
     }
 
-    let store = MeetingStore()
+    let store: MeetingStore
+    let transcription: TranscriptionCoordinator
+
+    init() {
+        let store = MeetingStore()
+        self.store = store
+        self.transcription = TranscriptionCoordinator(store: store)
+    }
     @Published private(set) var state = State.idle
     @Published private(set) var revision = 0
     @Published var error: String?
@@ -41,12 +48,15 @@ final class RecordingCoordinator: ObservableObject {
             revision += 1
         } catch {
             self.error = "Could not check for interrupted recordings. \(error.localizedDescription)"
+            return
         }
+        await transcription.start()
     }
 
     func toggle(for meetingID: UUID) {
         switch state {
         case .idle:
+            guard transcription.isReady else { return }
             state = .starting(meetingID)
             error = nil
             Task { await start(meetingID: meetingID) }
@@ -78,7 +88,8 @@ final class RecordingCoordinator: ObservableObject {
                 throw error
             }
 
-            let storage = RecordingStorage(store: store, root: root, recording: recording)
+            let storage = RecordingStorage(store: store, root: root, recording: recording,
+                                           checkpointPublished: transcription.checkpointPublished)
             let consumer = Task { [weak self] in
                 var lastUpdate = ContinuousClock.now
                 var peak = 0.0
@@ -94,6 +105,7 @@ final class RecordingCoordinator: ObservableObject {
             }
             session = Session(recording: recording, capture: capture, storage: storage, consumer: consumer, lock: lock)
             state = .recording(meetingID)
+            revision += 1
             Task {
                 if case .failure(let error) = await consumer.result, state == .recording(meetingID) {
                     state = .finishing(meetingID)
@@ -126,5 +138,6 @@ final class RecordingCoordinator: ObservableObject {
         levels.send(0)
         revision += 1
         state = .idle
+        transcription.checkpointPublished()
     }
 }
