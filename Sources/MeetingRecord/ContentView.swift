@@ -1,13 +1,14 @@
 import SwiftUI
 
 enum Destination: Hashable {
-    case home, search, labels, settings, meeting(UUID)
+    case home, search, labels, calendar, settings, meeting(UUID)
 
     var title: LocalizedStringKey {
         switch self {
         case .home: "Home"
         case .search: "Search"
         case .labels: "Labels"
+        case .calendar: "Calendar"
         case .settings: "Settings"
         case .meeting: "Meeting"
         }
@@ -71,6 +72,7 @@ struct ContentView: View {
     @State private var activeTab = MeetingTab.transcription
     @State private var settingsSection: SettingsSection?
     @State private var meetingEditor: MeetingEditorSheet?
+    @State private var calendarFocusDate: Date?
     private var store: MeetingStore { recording.store }
 
     private struct HomeLoadKey: Equatable {
@@ -147,8 +149,10 @@ struct ContentView: View {
                             switch activeTab {
                             case .inputs:
                                 InputsView(meetingID: meeting.id, store: store, revision: recording.revision,
+                                           calendarEventDate: meeting.calendarEventDate, calendarName: meeting.calendarName,
                                            transcription: transcription, revealLatest: revealLatestRecording,
-                                           openSettings: { request(.openModelSettings) })
+                                           openSettings: { request(.openModelSettings) },
+                                           openCalendar: { date in calendarFocusDate = date; destination = .calendar })
                                     .id(meeting.id)
                             case .transcription:
                                 TranscriptionView(meetingID: meeting.id, store: store,
@@ -189,6 +193,8 @@ struct ContentView: View {
                                    openMeeting: { request(.navigate(.meeting($0))) })
                     } else if destination == .labels {
                         LabelsView(store: store, onChange: reloadMeetingLabels)
+                    } else if destination == .calendar {
+                        CalendarView(initialDate: calendarFocusDate, createMeeting: createMeetingFromCalendar)
                     } else {
                         HomeView(meetings: recentMeetings, error: homeError,
                                  recordedTime: recordedTime, completedTranscriptions: completedTranscriptions,
@@ -476,6 +482,22 @@ struct ContentView: View {
                 merge(meeting)
                 openMeeting(meeting.id)
                 self.creation = nil
+            } catch { mutationError = error.localizedDescription }
+            isSaving = false
+        }
+    }
+
+    private func createMeetingFromCalendar(title: String, description: String?, calendarDate: Date, calendarName: String) {
+        guard canCreate else { return }
+        isSaving = true
+        mutationError = nil
+        Task {
+            do {
+                let meeting = try await store.createMeeting(id: UUID(), name: title, description: description,
+                                                            calendarEventDate: calendarDate, calendarName: calendarName)
+                merge(meeting)
+                openMeeting(meeting.id)
+                destination = .meeting(meeting.id)
             } catch { mutationError = error.localizedDescription }
             isSaving = false
         }

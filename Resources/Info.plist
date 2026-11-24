@@ -19,4 +19,5 @@
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSMicrophoneUsageDescription</key><string>Meeting Record saves your microphone as the Me track when you start recording.</string>
+<key>NSCalendarsFullAccessUsageDescription</key><string>Meeting Record reads your calendar events so you can associate them with meetings.</string>
 </dict></plist>

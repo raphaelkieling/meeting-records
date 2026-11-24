@@ -61,8 +61,10 @@ actor MeetingStore {
         }
     }
 
-    func createMeeting(id: UUID, name: String) throws -> Meeting {
+    func createMeeting(id: UUID, name: String, description: String? = nil,
+                       calendarEventDate: Date? = nil, calendarName: String? = nil) throws -> Meeting {
         let name = try Meeting.normalizedName(name)
+        let description = Meeting.normalizedDescription(description)
         return try withDatabase { db in
             try transaction(db: db) {
                 let meetings = try readMeetings(db: db)
@@ -70,14 +72,24 @@ actor MeetingStore {
                 guard try !exists("SELECT 1 FROM pending_meeting_deletions WHERE meetingID = ?", id: id, db: db)
                 else { throw MeetingStoreError.notFound }
                 let time = try nextUpdate(after: meetings)
-                let meeting = try Meeting(id: id, name: name, createdAt: time, updatedAt: time)
-                let statement = try prepare("INSERT INTO meetings(id, name, createdAt, updatedAt) VALUES (?, ?, ?, ?)", db: db)
+                let meeting = try Meeting(id: id, name: name, description: description, createdAt: time, updatedAt: time,
+                                          calendarEventDate: calendarEventDate, calendarName: calendarName)
+                let statement = try prepare("INSERT INTO meetings(id, name, description, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?)", db: db)
                 defer { sqlite3_finalize(statement) }
                 try bind(id.uuidString, at: 1, to: statement)
                 try bind(name, at: 2, to: statement)
-                try check(sqlite3_bind_double(statement, 3, time.timeIntervalSince1970))
+                try bind(description, at: 3, to: statement)
                 try check(sqlite3_bind_double(statement, 4, time.timeIntervalSince1970))
+                try check(sqlite3_bind_double(statement, 5, time.timeIntervalSince1970))
                 try finish(statement)
+                if let calendarEventDate, let calendarName {
+                    let source = try prepare("INSERT INTO calendar_meeting_inputs(meetingID, eventDate, calendarName) VALUES (?, ?, ?)", db: db)
+                    defer { sqlite3_finalize(source) }
+                    try bind(id.uuidString, at: 1, to: source)
+                    try check(sqlite3_bind_double(source, 2, calendarEventDate.timeIntervalSince1970))
+                    try bind(calendarName, at: 3, to: source)
+                    try finish(source)
+                }
                 return meeting
             }
         }
@@ -92,7 +104,8 @@ actor MeetingStore {
                 guard existing.name != name else { return existing }
                 let meeting = try Meeting(id: id, name: name, description: existing.description, tags: existing.tags,
                                           createdAt: existing.createdAt,
-                                          updatedAt: nextUpdate(after: meetings))
+                                          updatedAt: nextUpdate(after: meetings),
+                                          calendarEventDate: existing.calendarEventDate, calendarName: existing.calendarName)
                 let statement = try prepare("UPDATE meetings SET name = ?, updatedAt = ? WHERE upper(id) = ?", db: db)
                 defer { sqlite3_finalize(statement) }
                 try bind(name, at: 1, to: statement)
@@ -113,7 +126,8 @@ actor MeetingStore {
                 guard let existing = meetings.first(where: { $0.id == id }) else { throw MeetingStoreError.notFound }
                 guard existing.description != description else { return existing }
                 let meeting = try Meeting(id: id, name: existing.name, description: description, tags: existing.tags,
-                                          createdAt: existing.createdAt, updatedAt: nextUpdate(after: meetings))
+                                          createdAt: existing.createdAt, updatedAt: nextUpdate(after: meetings),
+                                          calendarEventDate: existing.calendarEventDate, calendarName: existing.calendarName)
                 let statement = try prepare("UPDATE meetings SET description = ?, updatedAt = ? WHERE upper(id) = ?", db: db)
                 defer { sqlite3_finalize(statement) }
                 try bind(description, at: 1, to: statement)
@@ -299,15 +313,15 @@ actor MeetingStore {
         let version = sqlite3_column_int(statement, 0)
         sqlite3_finalize(statement)
         guard step == SQLITE_ROW else { throw MeetingStoreError.sqlite(step) }
-        guard (0...7).contains(version) else { throw MeetingStoreError.incompatibleVersion }
+        guard (0...8).contains(version) else { throw MeetingStoreError.incompatibleVersion }
         return version
     }
 
     private func ensureSchema(db: OpaquePointer) throws {
-        guard try schemaVersion(db: db) < 7 else { return }
+        guard try schemaVersion(db: db) < 8 else { return }
         try transaction(db: db) {
             let version = try schemaVersion(db: db)
-            guard version < 7 else { return }
+            guard version < 8 else { return }
             if version < 3 {
                 if version == 0 {
                     try execute("""
@@ -384,6 +398,9 @@ actor MeetingStore {
                     PRAGMA user_version = 7;
                     """, db: db)
             }
+            if version < 8 {
+                try execute("CREATE TABLE calendar_meeting_inputs(meetingID TEXT PRIMARY KEY NOT NULL REFERENCES meetings(id) ON DELETE CASCADE, eventDate REAL NOT NULL, calendarName TEXT NOT NULL); PRAGMA user_version = 8;", db: db)
+            }
         }
     }
 
@@ -391,9 +408,11 @@ actor MeetingStore {
         let updateColumn = legacy ? "createdAt" : "updatedAt"
         let orderColumn = recentOnly ? "createdAt" : updateColumn
         let limit = recentOnly ? " LIMIT 3" : ""
-        let descriptionColumn = legacy ? "NULL" : "description"
+        let calendarColumns = legacy ? "NULL, NULL" : "ci.eventDate, ci.calendarName"
+        let calendarJoin = legacy ? "" : "LEFT JOIN calendar_meeting_inputs ci ON ci.meetingID = m.id"
         let statement = try prepare("""
-            SELECT id, name, \(descriptionColumn), createdAt, \(updateColumn) FROM meetings
+            SELECT m.id, m.name, \(legacy ? "NULL" : "m.description"), m.createdAt, m.\(updateColumn), \(calendarColumns) FROM meetings m
+            \(calendarJoin)
             ORDER BY \(orderColumn) DESC, upper(id) ASC\(limit)
             """, db: db)
         defer { sqlite3_finalize(statement) }
@@ -412,13 +431,16 @@ actor MeetingStore {
             meetings.append(try Meeting(id: id, name: name,
                 description: text(statement, column: 2),
                 createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)),
-                updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 4))))
+                updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 4)),
+                calendarEventDate: sqlite3_column_type(statement, 5) == SQLITE_NULL ? nil : Date(timeIntervalSince1970: sqlite3_column_double(statement, 5)),
+                calendarName: text(statement, column: 6)))
         }
         guard !legacy, !meetings.isEmpty else { return meetings }
         let tagsByMeeting = try readTagsByMeeting(db: db)
         return try meetings.map { meeting in
             try Meeting(id: meeting.id, name: meeting.name, description: meeting.description,
-                        tags: tagsByMeeting[meeting.id] ?? [], createdAt: meeting.createdAt, updatedAt: meeting.updatedAt)
+                        tags: tagsByMeeting[meeting.id] ?? [], createdAt: meeting.createdAt, updatedAt: meeting.updatedAt,
+                        calendarEventDate: meeting.calendarEventDate, calendarName: meeting.calendarName)
         }
     }
 

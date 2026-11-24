@@ -7,9 +7,11 @@ struct Meeting: Identifiable, Equatable, Sendable {
     let tags: [Tag]
     let createdAt: Date
     let updatedAt: Date
+    let calendarEventDate: Date?
+    let calendarName: String?
 
     init(id: UUID, name: String, description: String? = nil, tags: [Tag] = [],
-         createdAt: Date, updatedAt: Date) throws {
+         createdAt: Date, updatedAt: Date, calendarEventDate: Date? = nil, calendarName: String? = nil) throws {
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               createdAt.timeIntervalSince1970.isFinite, updatedAt.timeIntervalSince1970.isFinite else {
             throw MeetingStoreError.invalidRecord
@@ -20,6 +22,8 @@ struct Meeting: Identifiable, Equatable, Sendable {
         self.tags = tags
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.calendarEventDate = calendarEventDate
+        self.calendarName = calendarName
     }
 
     static func normalizedName(_ value: String) throws -> String {

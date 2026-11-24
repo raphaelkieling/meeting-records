@@ -28,6 +28,7 @@ struct SidebarView: View {
             navigationButton("Home", icon: "house", target: .home)
             navigationButton("Search", icon: "magnifyingglass", target: .search)
             navigationButton("Labels", icon: "tag", target: .labels)
+            navigationButton("Calendar", icon: "calendar", target: .calendar)
             navigationButton("Settings", icon: "gearshape", target: .settings)
             HStack {
                 Text("Meetings").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
