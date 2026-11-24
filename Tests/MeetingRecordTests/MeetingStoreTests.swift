@@ -172,8 +172,9 @@ final class MeetingStoreTests: XCTestCase {
     @MainActor
     func testSummaryWaitsForCompleteTranscriptAndTracksItsRevision() async throws {
         actor Calls {
-            var count = 0
-            func next() -> Int { count += 1; return count }
+            var prompts: [String] = []
+            var count: Int { prompts.count }
+            func next(prompt: String) -> Int { prompts.append(prompt); return count }
         }
         enum Failure: Error { case modelUnavailable }
         let url = try temporaryURL()
@@ -203,13 +204,14 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertTrue(ready.canGenerate)
         XCTAssertTrue(ready.transcript.contains("Me: We agreed to ship on Friday."))
         let calls = Calls()
-        let coordinator = MeetingSummaryCoordinator(store: store) { _, _ in
-            guard await calls.next() == 1 else { throw Failure.modelUnavailable }
+        let coordinator = MeetingSummaryCoordinator(store: store) { _, _, prompt in
+            guard await calls.next(prompt: prompt) == 1 else { throw Failure.modelUnavailable }
             return "Ship on Friday."
         }
         let beforeClick = await calls.count
         XCTAssertEqual(beforeClick, 0)
-        coordinator.generate(for: meeting.id)
+        let customPrompt = "Respond in Brazilian Portuguese using three bullets."
+        coordinator.generate(for: meeting.id, prompt: customPrompt)
         coordinator.generate(for: meeting.id)
         for _ in 0..<100 where coordinator.generating.contains(meeting.id) {
             try await Task.sleep(for: .milliseconds(10))
@@ -217,6 +219,8 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertFalse(coordinator.generating.contains(meeting.id))
         let afterClick = await calls.count
         XCTAssertEqual(afterClick, 1)
+        let receivedPrompts = await calls.prompts
+        XCTAssertEqual(receivedPrompts, [customPrompt])
         let reopened = MeetingStore(databaseURL: url)
         let saved = try await reopened.summarySnapshot(for: meeting.id)
         XCTAssertEqual(saved.summary?.text, "Ship on Friday.")

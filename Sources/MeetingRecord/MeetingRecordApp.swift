@@ -7,6 +7,8 @@ extension Color {
 @main
 struct MeetingRecordApp: App {
     @StateObject private var recording = RecordingCoordinator()
+    @AppStorage("didDismissSetup") private var didDismissSetup = false
+    @State private var showingSetup = false
 
     var body: some Scene {
         Window("Meeting Record", id: "main") {
@@ -15,11 +17,22 @@ struct MeetingRecordApp: App {
                 .accentColor(.meetingAccent)
                 .tint(.meetingAccent)
                 .focusEffectDisabled()
+                .onAppear {
+                    if !didDismissSetup { showingSetup = true }
+                }
+                .sheet(isPresented: $showingSetup, onDismiss: finishSetup) {
+                    FirstLaunchSetupView(transcription: recording.transcription, close: finishSetup)
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1000, height: 700)
         .windowResizability(.contentMinSize)
         .commands { MeetingCommands() }
+    }
+
+    private func finishSetup() {
+        didDismissSetup = true
+        showingSetup = false
     }
 }
 

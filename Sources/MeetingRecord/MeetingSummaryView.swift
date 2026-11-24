@@ -11,11 +11,13 @@ struct MeetingSummaryView: View {
     @ObservedObject var summaries: MeetingSummaryCoordinator
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(SummaryModel.preferenceKey) private var selectedModel: SummaryModel = .appleIntelligence
+    @AppStorage(SummaryPrompt.libraryKey) private var promptLibrary = Data()
+    @AppStorage(SummaryPrompt.legacyPreferenceKey) private var legacyPrompt = ""
     @AppStorage(OpenAISummaryKey.savedPreferenceKey) private var hasOpenAIKey = false
     @State private var snapshot: MeetingSummarySnapshot?
     @State private var loadError: String?
     @State private var modelAvailability: MeetingSummarizer.Availability?
-    @State private var confirmingGeneration = false
+    @State private var generationRequest: SummaryGenerationRequest?
 
     private struct AvailabilityCheck: Equatable {
         let scenePhase: ScenePhase
@@ -55,17 +57,9 @@ struct MeetingSummaryView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: isGenerating)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: summaries.revision)
-        .alert(snapshot?.summary == nil ? "Generate Summary?" : "Regenerate Summary?",
-               isPresented: $confirmingGeneration, presenting: selectedModel) { model in
-            Button(snapshot?.summary == nil ? "Generate Summary" : "Regenerate Summary") {
-                summaries.generate(for: meetingID, model: model)
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: { model in
-            if model.usesOpenAI {
-                Text("Using \(model.displayName) sends this meeting’s transcript text to OpenAI.")
-            } else {
-                Text("Apple Intelligence will summarize this meeting on your Mac.")
+        .sheet(item: $generationRequest) { request in
+            SummaryGenerationSheet(request: request, canGenerate: canGenerate) { prompt in
+                summaries.generate(for: meetingID, model: request.model, prompt: prompt)
             }
         }
         .task(id: [recordingRevision, transcriptionRevision, summaries.revision]) {
@@ -85,6 +79,12 @@ struct MeetingSummaryView: View {
         }
     }
 
+    private func prepareGeneration() {
+        let prompts = SummaryPrompt.library(from: promptLibrary, legacyText: legacyPrompt)
+        generationRequest = SummaryGenerationRequest(model: selectedModel, prompts: prompts,
+                                                     regenerating: snapshot?.summary != nil)
+    }
+
     private var summaryActions: some View {
         HStack(spacing: 10) {
             Text(snapshot?.isOutdated == true
@@ -93,9 +93,7 @@ struct MeetingSummaryView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
             Spacer(minLength: 0)
-            Button {
-                confirmingGeneration = true
-            } label: {
+            Button(action: prepareGeneration) {
                 Image(systemName: "sparkles")
             }
             .disabled(!canGenerate)
@@ -125,9 +123,7 @@ struct MeetingSummaryView: View {
             if isGenerating {
                 ProgressView("Generating summary…").controlSize(.small)
             } else if let snapshot, !snapshot.transcript.isEmpty, loadError == nil {
-                Button {
-                    confirmingGeneration = true
-                } label: {
+                Button(action: prepareGeneration) {
                     Label(summaries.errors[meetingID] == nil ? "Generate Summary" : "Retry Summary",
                           systemImage: "sparkles")
                         .font(.callout.weight(.medium))
@@ -192,6 +188,53 @@ struct MeetingSummaryView: View {
     private func formattedText(_ value: String) -> Text {
         let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         return (try? AttributedString(markdown: value, options: options)).map { Text($0) } ?? Text(value)
+    }
+}
+
+private struct SummaryGenerationRequest: Identifiable {
+    let id = UUID()
+    let model: SummaryModel
+    let prompts: [SummaryPrompt]
+    let regenerating: Bool
+}
+
+private struct SummaryGenerationSheet: View {
+    let request: SummaryGenerationRequest
+    let canGenerate: Bool
+    let generate: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedPromptID = SummaryPrompt.general.id
+
+    var body: some View {
+        let title = request.regenerating ? "Regenerate Summary" : "Generate Summary"
+        let model = request.model
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title).font(.headline)
+            Picker("Prompt", selection: $selectedPromptID) {
+                ForEach(request.prompts) { prompt in
+                    Text(prompt.name).tag(prompt.id)
+                }
+            }
+            Text(model.usesOpenAI
+                 ? "Using \(model.displayName) sends this meeting’s transcript text and prompt to OpenAI."
+                 : "Apple Intelligence will summarize this meeting on your Mac.")
+                .font(.callout).foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button(title) {
+                    guard let prompt = request.prompts.first(where: { $0.id == selectedPromptID }) else { return }
+                    generate(prompt.text)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canGenerate)
+            }
+        }
+        .padding(22)
+        .frame(width: 420)
     }
 }
 

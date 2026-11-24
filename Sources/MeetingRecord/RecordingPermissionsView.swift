@@ -7,13 +7,14 @@ struct RecordingPermissionsView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @Binding var microphoneAllowed: Bool?
+    var showsHeading = true
     @State private var screenCaptureAllowed: Bool?
     @State private var requestingMicrophone = false
     private let appURL = Bundle.main.bundleURL
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Recording Permissions").font(.headline)
+            if showsHeading { Text("Recording Permissions").font(.headline) }
             HStack {
                 Label("Microphone", systemImage: "mic")
                 Spacer()

@@ -237,6 +237,9 @@ private struct TranscriptionModelSettings: View {
                 Text(model.name)
                 Text(ByteCountFormatter.string(fromByteCount: model.downloadSize, countStyle: .file))
                     .font(.caption).foregroundStyle(.secondary)
+                if model.isNemotron {
+                    Text("Recommended").font(.caption.weight(.medium)).foregroundStyle(Color.meetingAccent)
+                }
                 Spacer()
                 if installed && selected {
                     Label("Active", systemImage: "checkmark.circle.fill")
@@ -245,7 +248,7 @@ private struct TranscriptionModelSettings: View {
                     Button("Use Model") { transcription.select(model) }
                 } else {
                     Button("Download") { Task { await transcription.download(model) } }
-                        .disabled(transcription.downloading != nil)
+                        .disabled(!transcription.canDownload)
                 }
             }
             if transcription.downloading == model {
@@ -304,6 +307,10 @@ private struct SummarizationSettings: View {
             } else {
                 AppleIntelligenceAvailability()
             }
+
+            Divider().padding(.vertical, 4)
+
+            SummaryPromptSettings()
         }
         .onDisappear { draftKey = "" }
         .onChange(of: model.usesOpenAI) { _, usesOpenAI in

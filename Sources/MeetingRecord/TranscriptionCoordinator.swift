@@ -21,6 +21,7 @@ final class TranscriptionCoordinator: ObservableObject {
     private let selectionKey = "selectedTranscriptionModel"
 
     var isReady: Bool { installed.contains(selected.id) }
+    var canDownload: Bool { recordingsRoot != nil && downloading == nil }
     var checkpointPublished: @Sendable () -> Void {
         let wakeup = events.continuation
         return { wakeup.yield(()) }
