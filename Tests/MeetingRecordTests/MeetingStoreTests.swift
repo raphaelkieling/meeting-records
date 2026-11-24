@@ -32,11 +32,11 @@ final class MeetingStoreTests: XCTestCase {
         return sqlite3_column_int(statement, 0)
     }
 
-    func testFreshDatabaseIsEmptyV7() async throws {
+    func testFreshDatabaseIsEmptyV8() async throws {
         let url = try temporaryURL()
         let meetings = try await MeetingStore(databaseURL: url).loadMeetings()
         XCTAssertTrue(meetings.isEmpty)
-        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 7)
+        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 8)
     }
 
     func testThirtyRecordsReopenUnicodeDuplicateNamesAndStableOrder() async throws {
@@ -72,6 +72,7 @@ final class MeetingStoreTests: XCTestCase {
             ALTER TABLE meetings DROP COLUMN description;
             DROP TABLE meeting_summaries;
             DROP TABLE pending_meeting_deletions;
+            DROP TABLE calendar_meeting_inputs;
             PRAGMA user_version=4;
             """, at: url)
 
@@ -82,7 +83,7 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertEqual(summary.completedTranscriptions, 0)
         let all = try await reopened.loadMeetings()
         XCTAssertEqual(all.first?.name, "Renamed first")
-        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 7)
+        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 8)
     }
 
     func testTranscriptionWorkBatchesAdjacentCheckpointsPerSource() async throws {

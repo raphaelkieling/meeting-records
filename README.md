@@ -1,6 +1,12 @@
 # Meeting Record
 
-Local macOS app built with SwiftUI and SQLite. Requires Apple Silicon, macOS 14+, and Xcode with Swift 6.
+<p align="center">
+  <img src="Resources/AppIcon.png" width="128" alt="Meeting Record app icon">
+</p>
+
+A private, local-first macOS app for recording and transcribing meetings, organizing conversations, and generating AI summaries. Meeting data stays on your Mac in a SQLite library.
+
+Requires Apple Silicon, macOS 14+, and Xcode with Swift 6.
 
 Build and open the app:
 
@@ -14,6 +20,6 @@ Run `./scripts/build-dmg.sh` from a logged-in macOS desktop session to build `.b
 
 Home and Settings stay above the scrollable Meetings list. Use arrow keys to move focus and Return or Space to select.
 
-Meetings are stored in `~/Library/Application Support/MeetingRecord/meetings.sqlite`. The app currently supports navigation and reading existing meetings.
+Meetings and transcripts are stored in `~/Library/Application Support/MeetingRecord/meetings.sqlite`, with recordings kept alongside the library on your Mac.
 
 [Manual testing guide](specs/001-app-shell/quickstart.md)

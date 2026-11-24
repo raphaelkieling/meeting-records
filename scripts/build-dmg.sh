@@ -2,6 +2,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+mode="${1:-}"
+[[ $# -le 1 && ( -z "$mode" || "$mode" == "--ci" ) ]] || { echo 'Usage: scripts/build-dmg.sh [--ci]' >&2; exit 2; }
+
 scripts/build-app.sh --release
 
 work_dir=$(mktemp -d "$PWD/.build/dmg.XXXXXX")
@@ -19,6 +22,14 @@ mkdir -p "$work_dir/staging/.background" "$mount_dir"
 ditto .build/MeetingRecord.app "$work_dir/staging/Meeting Record.app"
 ln -s /Applications "$work_dir/staging/Applications"
 cp Resources/DMGBackground.png "$work_dir/staging/.background/install.png"
+
+if [[ "$mode" == "--ci" ]]; then
+  hdiutil create -quiet -fs HFS+ -format UDZO -volname "Meeting Record" \
+    -srcfolder "$work_dir/staging" "$work_dir/MeetingRecord.dmg"
+  mv -f "$work_dir/MeetingRecord.dmg" .build/MeetingRecord.dmg
+  echo "Built .build/MeetingRecord.dmg (CI layout)"
+  exit 0
+fi
 
 hdiutil create -quiet -fs HFS+ -format UDRW -volname "Meeting Record" \
   -srcfolder "$work_dir/staging" "$work_dir/layout.dmg"

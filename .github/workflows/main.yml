@@ -1,0 +1,31 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  test-build-release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run tests
+        run: xcrun swift test --disable-sandbox --cache-path .build/cache --manifest-cache local
+
+      - name: Build disk image
+        run: scripts/build-dmg.sh --ci
+
+      - name: Publish GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="main-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          short_sha="${GITHUB_SHA::7}"
+          gh release create "$tag" .build/MeetingRecord.dmg \
+            --title "Main build ${short_sha}" \
+            --generate-notes \
+            --prerelease
