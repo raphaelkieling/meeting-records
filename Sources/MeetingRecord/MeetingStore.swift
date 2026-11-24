@@ -96,46 +96,43 @@ actor MeetingStore {
     }
 
     func renameMeeting(id: UUID, name: String) throws -> Meeting {
+        try updateMeeting(id: id, name: name, metadata: nil)
+    }
+
+    func updateMeeting(id: UUID, name: String, description: String?, selectedTagIDs: Set<UUID>) throws -> Meeting {
+        try updateMeeting(id: id, name: name, metadata: (Meeting.normalizedDescription(description), selectedTagIDs))
+    }
+
+    private func updateMeeting(id: UUID, name: String, metadata: (description: String?, tags: Set<UUID>)?) throws -> Meeting {
         let name = try Meeting.normalizedName(name)
         return try withDatabase { db in
             try transaction(db: db) {
                 let meetings = try readMeetings(db: db)
                 guard let existing = meetings.first(where: { $0.id == id }) else { throw MeetingStoreError.notFound }
-                guard existing.name != name else { return existing }
-                let meeting = try Meeting(id: id, name: name, description: existing.description, tags: existing.tags,
-                                          createdAt: existing.createdAt,
-                                          updatedAt: nextUpdate(after: meetings),
-                                          calendarEventDate: existing.calendarEventDate, calendarName: existing.calendarName)
-                let statement = try prepare("UPDATE meetings SET name = ?, updatedAt = ? WHERE upper(id) = ?", db: db)
-                defer { sqlite3_finalize(statement) }
-                try bind(name, at: 1, to: statement)
-                try check(sqlite3_bind_double(statement, 2, meeting.updatedAt.timeIntervalSince1970))
-                try bind(id.uuidString, at: 3, to: statement)
-                try finish(statement)
-                guard sqlite3_changes(db) == 1 else { throw MeetingStoreError.notFound }
-                return meeting
-            }
-        }
-    }
+                let description = if let metadata { metadata.description } else { existing.description }
+                var updatedAt = existing.updatedAt
+                if existing.name != name || existing.description != description {
+                    updatedAt = try nextUpdate(after: meetings)
+                    let statement = try prepare("""
+                        UPDATE meetings SET name = ?, description = ?, updatedAt = ? WHERE upper(id) = ?
+                        """, db: db)
+                    defer { sqlite3_finalize(statement) }
+                    try bind(name, at: 1, to: statement)
+                    try bind(description, at: 2, to: statement)
+                    try check(sqlite3_bind_double(statement, 3, updatedAt.timeIntervalSince1970))
+                    try bind(id.uuidString, at: 4, to: statement)
+                    try finish(statement)
+                    guard sqlite3_changes(db) == 1 else { throw MeetingStoreError.notFound }
+                }
 
-    func updateMeetingDescription(id: UUID, description: String?) throws -> Meeting {
-        let description = Meeting.normalizedDescription(description)
-        return try withDatabase { db in
-            try transaction(db: db) {
-                let meetings = try readMeetings(db: db)
-                guard let existing = meetings.first(where: { $0.id == id }) else { throw MeetingStoreError.notFound }
-                guard existing.description != description else { return existing }
-                let meeting = try Meeting(id: id, name: existing.name, description: description, tags: existing.tags,
-                                          createdAt: existing.createdAt, updatedAt: nextUpdate(after: meetings),
-                                          calendarEventDate: existing.calendarEventDate, calendarName: existing.calendarName)
-                let statement = try prepare("UPDATE meetings SET description = ?, updatedAt = ? WHERE upper(id) = ?", db: db)
-                defer { sqlite3_finalize(statement) }
-                try bind(description, at: 1, to: statement)
-                try check(sqlite3_bind_double(statement, 2, meeting.updatedAt.timeIntervalSince1970))
-                try bind(id.uuidString, at: 3, to: statement)
-                try finish(statement)
-                guard sqlite3_changes(db) == 1 else { throw MeetingStoreError.notFound }
-                return meeting
+                var tags = existing.tags
+                if let metadata, metadata.tags != Set(tags.map(\.id)) {
+                    try writeMeetingTags(meetingID: id, selectedTagIDs: metadata.tags, newTags: [], db: db)
+                    tags = try readTagsByMeeting(db: db)[id] ?? []
+                }
+                return try Meeting(id: id, name: name, description: description, tags: tags,
+                                   createdAt: existing.createdAt, updatedAt: updatedAt,
+                                   calendarEventDate: existing.calendarEventDate, calendarName: existing.calendarName)
             }
         }
     }
@@ -202,27 +199,31 @@ actor MeetingStore {
                 guard try exists("SELECT 1 FROM meetings WHERE upper(id) = ?", id: meetingID, db: db) else {
                     throw MeetingStoreError.notFound
                 }
-                let existingTags = try readAllTags(db: db)
-                var normalizedNames = Set(existingTags.map(\.normalizedKey))
-                var validTagIDs = Set(existingTags.map(\.id))
-                for tag in newTags {
-                    guard normalizedNames.insert(tag.normalizedKey).inserted else { throw MeetingStoreError.duplicateTagName }
-                    guard validTagIDs.insert(tag.id).inserted else { throw MeetingStoreError.invalidRecord }
-                }
-                guard selectedTagIDs.isSubset(of: validTagIDs) else { throw MeetingStoreError.notFound }
-                for tag in newTags { try writeTag(tag, db: db) }
-                try execute("DELETE FROM meeting_tags WHERE upper(meetingID) = ?", id: meetingID, db: db)
-                for tagID in selectedTagIDs.sorted(by: { $0.uuidString < $1.uuidString }) {
-                    let statement = try prepare("""
-                        INSERT INTO meeting_tags(meetingID, tagID)
-                        SELECT id, ? FROM meetings WHERE upper(id) = ?
-                        """, db: db)
-                    defer { sqlite3_finalize(statement) }
-                    try bind(tagID.uuidString, at: 1, to: statement)
-                    try bind(meetingID.uuidString, at: 2, to: statement)
-                    try finish(statement)
-                }
+                try writeMeetingTags(meetingID: meetingID, selectedTagIDs: selectedTagIDs, newTags: newTags, db: db)
             }
+        }
+    }
+
+    private func writeMeetingTags(meetingID: UUID, selectedTagIDs: Set<UUID>, newTags: [Tag], db: OpaquePointer) throws {
+        let existingTags = try readAllTags(db: db)
+        var normalizedNames = Set(existingTags.map(\.normalizedKey))
+        var validTagIDs = Set(existingTags.map(\.id))
+        for tag in newTags {
+            guard normalizedNames.insert(tag.normalizedKey).inserted else { throw MeetingStoreError.duplicateTagName }
+            guard validTagIDs.insert(tag.id).inserted else { throw MeetingStoreError.invalidRecord }
+        }
+        guard selectedTagIDs.isSubset(of: validTagIDs) else { throw MeetingStoreError.notFound }
+        for tag in newTags { try writeTag(tag, db: db) }
+        try execute("DELETE FROM meeting_tags WHERE upper(meetingID) = ?", id: meetingID, db: db)
+        for tagID in selectedTagIDs.sorted(by: { $0.uuidString < $1.uuidString }) {
+            let statement = try prepare("""
+                INSERT INTO meeting_tags(meetingID, tagID)
+                SELECT id, ? FROM meetings WHERE upper(id) = ?
+                """, db: db)
+            defer { sqlite3_finalize(statement) }
+            try bind(tagID.uuidString, at: 1, to: statement)
+            try bind(meetingID.uuidString, at: 2, to: statement)
+            try finish(statement)
         }
     }
 

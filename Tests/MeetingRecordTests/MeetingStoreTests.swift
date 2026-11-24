@@ -126,7 +126,8 @@ final class MeetingStoreTests: XCTestCase {
         try await store.saveMeetingTags(meetingID: first.id, selectedTagIDs: [work.id, oneOnOne.id],
                                         newTags: [work, oneOnOne])
         try await store.saveMeetingTags(meetingID: second.id, selectedTagIDs: [work.id], newTags: [])
-        _ = try await store.updateMeetingDescription(id: first.id, description: "  Budget at 50%  ")
+        _ = try await store.updateMeeting(id: first.id, name: first.name, description: "  Budget at 50%  ",
+                                          selectedTagIDs: [work.id, oneOnOne.id])
 
         let reopened = MeetingStore(databaseURL: url)
         let tagMatches = try await reopened.searchMeetings(.init(text: "WORK", selectedTagIDs: []))
@@ -139,6 +140,33 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertEqual(Set(combined.first?.assignedTags.map(\.id) ?? []), [work.id, oneOnOne.id])
         let rejected = try await reopened.searchMeetings(.init(text: "Follow", selectedTagIDs: [work.id, oneOnOne.id]))
         XCTAssertTrue(rejected.isEmpty)
+    }
+
+    func testMeetingEditSavesAllFieldsAndRollsBackIfLabelsFail() async throws {
+        let url = try temporaryURL()
+        let store = MeetingStore(databaseURL: url)
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        let meeting = try await store.createMeeting(id: UUID(), name: "Planning", description: "Old notes",
+                                                    calendarEventDate: date, calendarName: "Work")
+        let tag = try Tag(id: UUID(), name: "Follow Up", color: .blue)
+        try await store.saveTag(tag, updating: false)
+
+        let edited = try await store.updateMeeting(id: meeting.id, name: "  Review ", description: " ",
+                                                   selectedTagIDs: [tag.id])
+        XCTAssertEqual(edited.name, "Review")
+        XCTAssertNil(edited.description)
+        XCTAssertEqual(edited.tags, [tag])
+        XCTAssertEqual(edited.calendarEventDate, date)
+        XCTAssertEqual(edited.calendarName, "Work")
+
+        do {
+            _ = try await store.updateMeeting(id: meeting.id, name: "Unsaved", description: "Unsaved notes",
+                                              selectedTagIDs: [UUID()])
+            XCTFail("An unavailable label should fail the edit")
+        } catch MeetingStoreError.notFound {}
+
+        let persisted = try await MeetingStore(databaseURL: url).loadMeetings()
+        XCTAssertEqual(persisted, [edited])
     }
 
     @MainActor

@@ -1,13 +1,13 @@
 import SwiftUI
 
 enum Destination: Hashable {
-    case home, search, labels, calendar, settings, meeting(UUID)
+    case home, labels, calendar, settings, meeting(UUID), label(Tag)
 
     var title: LocalizedStringKey {
         switch self {
         case .home: "Home"
-        case .search: "Search"
         case .labels: "Labels"
+        case .label(let tag): "\(tag.name)"
         case .calendar: "Calendar"
         case .settings: "Settings"
         case .meeting: "Meeting"
@@ -30,18 +30,7 @@ struct RenameSession {
 
 private enum MeetingAction {
     case navigate(Destination), openRecent(UUID), openModelSettings, create, rename(UUID, RenameOrigin)
-    case editTags(UUID), editDescription(UUID), delete(UUID)
-}
-
-private enum MeetingEditorSheet: Identifiable {
-    case tags(Meeting), description(Meeting)
-
-    var id: String {
-        switch self {
-        case .tags(let meeting): "tags-\(meeting.id.uuidString)"
-        case .description(let meeting): "description-\(meeting.id.uuidString)"
-        }
-    }
+    case edit(UUID), delete(UUID), showCommandPalette
 }
 
 struct ContentView: View {
@@ -71,8 +60,9 @@ struct ContentView: View {
     @State private var revealLatestRecording = false
     @State private var activeTab = MeetingTab.transcription
     @State private var settingsSection: SettingsSection?
-    @State private var meetingEditor: MeetingEditorSheet?
+    @State private var meetingEditor: Meeting?
     @State private var calendarFocusDate: Date?
+    @State private var isCommandPalettePresented = false
     private var store: MeetingStore { recording.store }
 
     private struct HomeLoadKey: Equatable {
@@ -123,11 +113,9 @@ struct ContentView: View {
                 canCreate: canCreate, revealID: revealID, revealVersion: revealVersion,
                 recordingMeetingID: recordingMeetingID,
                 navigate: { request(.navigate($0)) }, create: { request(.create) },
+                openSearch: { request(.showCommandPalette) },
                 rename: { request(.rename($0, .sidebar)) },
-                editTags: { request(.editTags($0)) },
-                editDescription: { request(.editDescription($0)) },
-                canDelete: { !isSaving && recording.canDelete($0) },
-                delete: { request(.delete($0)) },
+                meetingActions: meetingActions,
                 save: saveRename, cancel: cancelRename,
                 retry: { Task { await loadMeetings() } }
             )
@@ -135,10 +123,25 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 20) {
                 if let meeting = selectedMeeting {
                     VStack(alignment: .leading, spacing: 6) {
-                        InlineMeetingName(meeting: meeting, origin: .header, editor: $editor,
-                                          isSaving: isSaving, begin: { request(.rename(meeting.id, .header)) },
-                                          save: saveRename, cancel: cancelRename)
-                            .font(.largeTitle.bold())
+                        HStack(spacing: 12) {
+                            InlineMeetingName(meeting: meeting, origin: .header, editor: $editor,
+                                              isSaving: isSaving, begin: { request(.rename(meeting.id, .header)) },
+                                              save: saveRename, cancel: cancelRename)
+                                .font(.largeTitle.bold())
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                                .contextMenu { meetingActions(meeting) }
+
+                            Menu { meetingActions(meeting) } label: {
+                                Image(systemName: "ellipsis")
+                                    .font(.body.weight(.semibold))
+                            }
+                            .menuStyle(.borderlessButton)
+                            .menuIndicator(.hidden)
+                            .fixedSize()
+                            .help("Meeting actions")
+                            .accessibilityLabel("Meeting actions")
+                        }
                         meetingMetadata(meeting)
                     }
                     VStack(alignment: .leading, spacing: 0) {
@@ -187,10 +190,8 @@ struct ContentView: View {
                     if destination == .settings {
                         SettingsView(section: $settingsSection, transcription: transcription, recording: recording,
                                      deleteAll: deleteAllMeetingData)
-                    } else if destination == .search {
-                        SearchView(store: store,
-                                   refreshKey: "\(homeRevision)-\(recording.revision)-\(transcription.revision)",
-                                   openMeeting: { request(.navigate(.meeting($0))) })
+                    } else if case .label(let tag) = destination {
+                        meetingsWithLabel(tag)
                     } else if destination == .labels {
                         LabelsView(store: store, onChange: reloadMeetingLabels)
                     } else if destination == .calendar {
@@ -275,37 +276,102 @@ struct ContentView: View {
         } message: {
             Text(deletionError ?? "")
         }
-        .sheet(item: $meetingEditor) { sheet in
-            switch sheet {
-            case .tags(let meeting):
-                TagManagementView(meeting: meeting, store: store, onSave: reloadMeetingLabels)
-            case .description(let meeting):
-                MeetingDescriptionEditorView(meeting: meeting, store: store) { updated in merge(updated) }
+        .sheet(item: $meetingEditor) { meeting in
+            MeetingEditorView(meeting: meeting, store: store, onSave: merge)
+        }
+        .sheet(isPresented: $isCommandPalettePresented) {
+            CommandPaletteView(meetings: meetings, store: store, commands: paletteCommands, activate: activatePaletteItem)
+        }
+        .focusedSceneValue(\.openCommandPalette, { request(.showCommandPalette) })
+    }
+
+    private var paletteCommands: [PaletteCommand] {
+        [
+            PaletteCommand(title: "Open Settings", icon: "gearshape", keywords: ["preferences"]) {
+                request(.navigate(.settings))
+            },
+            PaletteCommand(title: "Go to Home", icon: "house", keywords: []) {
+                request(.navigate(.home))
+            },
+            PaletteCommand(title: "Open Labels", icon: "tag", keywords: ["tags"]) {
+                request(.navigate(.labels))
+            },
+            PaletteCommand(title: "Open Calendar", icon: "calendar", keywords: []) {
+                request(.navigate(.calendar))
+            },
+            PaletteCommand(title: "New Meeting", icon: "plus", keywords: ["create", "add"]) {
+                request(.create)
+            },
+        ]
+    }
+
+    private func activatePaletteItem(_ item: PaletteItem) {
+        isCommandPalettePresented = false
+        switch item {
+        case .meeting(let meeting): request(.navigate(.meeting(meeting.id)))
+        case .tag(let tag): request(.navigate(.label(tag)))
+        case .command(let command): command.run()
+        }
+    }
+
+    private func meetingsWithLabel(_ tag: Tag) -> some View {
+        let taggedMeetings = meetings.filter { $0.tags.contains { $0.id == tag.id } }
+        return Group {
+            if taggedMeetings.isEmpty {
+                MeetingEmptyState("No Meetings With This Label", icon: "tag",
+                                  detail: "Meetings with this label will appear here.")
+                    .frame(maxWidth: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(taggedMeetings) { meeting in
+                            Button {
+                                request(.navigate(.meeting(meeting.id)))
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: "text.bubble")
+                                        .foregroundStyle(Color.meetingAccent)
+                                        .accessibilityHidden(true)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(meeting.name)
+                                        if let description = meeting.description {
+                                            Text(description).font(.callout).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    .lineLimit(1)
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .accessibilityHidden(true)
+                                }
+                                .padding(10)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(4)
+                }
+                .background(.background.secondary, in: RoundedRectangle(cornerRadius: 8))
             }
         }
     }
 
+    private func meetingActions(_ meeting: Meeting) -> MeetingActions {
+        MeetingActions(meeting: meeting, canEdit: !isSaving && !recording.isDeleting(meeting.id),
+                       canDelete: !isSaving && recording.canDelete(meeting.id),
+                       edit: { request(.edit(meeting.id)) }, delete: { request(.delete(meeting.id)) })
+    }
+
     private func meetingMetadata(_ meeting: Meeting) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            if let description = meeting.description {
-                Button { request(.editDescription(meeting.id)) } label: {
-                    Text(description)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.leading)
-                        .lineLimit(3)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .buttonStyle(.plain)
-                .help("Edit Description")
-                .accessibilityHint("Opens the full description for editing")
-            } else {
-                Button("Add a description…") { request(.editDescription(meeting.id)) }
-                    .buttonStyle(.plain)
-                    .font(.callout)
-                    .foregroundStyle(.tertiary)
-            }
-            Spacer(minLength: 0)
+        HStack(spacing: 12) {
+            Text(meeting.description ?? "No description")
+                .font(.callout)
+                .foregroundStyle(meeting.description == nil ? .tertiary : .secondary)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
             if !meeting.tags.isEmpty {
                 ViewThatFits(in: .horizontal) {
                     meetingLabelPills(meeting.tags)
@@ -317,6 +383,7 @@ struct ContentView: View {
                 .frame(maxWidth: 240, alignment: .trailing)
             }
         }
+        .frame(height: 22)
     }
 
     private func meetingLabelPills(_ tags: [Tag]) -> some View {
@@ -398,10 +465,11 @@ struct ContentView: View {
             revealLatestRecording = false
             settingsSection = .models
             destination = .settings
-        case .editTags(let id):
-            if let meeting = meetings.first(where: { $0.id == id }) { meetingEditor = .tags(meeting) }
-        case .editDescription(let id):
-            if let meeting = meetings.first(where: { $0.id == id }) { meetingEditor = .description(meeting) }
+        case .showCommandPalette:
+            if meetingEditor == nil && pendingDeletion == nil { isCommandPalettePresented = true }
+        case .edit(let id):
+            guard !recording.isDeleting(id) else { return }
+            meetingEditor = meetings.first { $0.id == id }
         case .create: createMeeting()
         case .rename(let id, let origin):
             guard !recording.isDeleting(id),
@@ -616,6 +684,7 @@ struct InlineMeetingName: View {
                 VStack(alignment: .leading, spacing: 6) {
                     TextField("Meeting name", text: draft, axis: .vertical)
                         .textFieldStyle(.plain)
+                        .lineLimit(origin == .header ? 1 : nil)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .focused($isFocused)
@@ -641,7 +710,7 @@ struct InlineMeetingName: View {
                             }
                         }
                         .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
+                        .padding(.vertical, origin == .header ? 0 : 4)
                         .background(.background, in: RoundedRectangle(cornerRadius: 6))
                         .overlay {
                             RoundedRectangle(cornerRadius: 6)
@@ -662,7 +731,6 @@ struct InlineMeetingName: View {
                     .help(meeting.name + " — Double-click to rename")
                     .contentShape(Rectangle())
                     .onTapGesture(count: 2, perform: begin)
-                    .contextMenu { Button("Rename", action: begin) }
                     .accessibilityAction(named: Text("Rename"), begin)
             } else {
                 name.help(meeting.name)
@@ -674,7 +742,7 @@ struct InlineMeetingName: View {
 
     private var name: some View {
         Text(meeting.name)
-            .lineLimit(origin == .sidebar ? 1 : 2)
+            .lineLimit(1)
             .truncationMode(.tail)
     }
 }

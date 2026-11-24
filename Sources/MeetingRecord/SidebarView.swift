@@ -1,5 +1,4 @@
 import SwiftUI
-import AppKit
 
 struct SidebarView: View {
     let destination: Destination
@@ -12,11 +11,9 @@ struct SidebarView: View {
     let recordingMeetingID: UUID?
     let navigate: (Destination) -> Void
     let create: () -> Void
+    let openSearch: () -> Void
     let rename: (UUID) -> Void
-    let editTags: (UUID) -> Void
-    let editDescription: (UUID) -> Void
-    let canDelete: (UUID) -> Bool
-    let delete: (UUID) -> Void
+    let meetingActions: (Meeting) -> MeetingActions
     let save: () -> Void
     let cancel: () -> Void
     let retry: () -> Void
@@ -26,7 +23,17 @@ struct SidebarView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             navigationButton("Home", icon: "house", target: .home)
-            navigationButton("Search", icon: "magnifyingglass", target: .search)
+            Button(action: openSearch) {
+                HStack {
+                    Label("Search", systemImage: "magnifyingglass")
+                    Spacer()
+                    Text("⌘K").font(.caption).foregroundStyle(.secondary).accessibilityHidden(true)
+                }
+                .padding(.horizontal, 8).padding(.vertical, 6)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Search meetings, tags, and commands")
             navigationButton("Labels", icon: "tag", target: .labels)
             navigationButton("Calendar", icon: "calendar", target: .calendar)
             navigationButton("Settings", icon: "gearshape", target: .settings)
@@ -100,7 +107,7 @@ struct SidebarView: View {
             guard editor == nil else { return }
             let meetings: [Meeting]
             if case .loaded(let values) = state { meetings = values } else { meetings = [] }
-            let targets: [Destination] = [.home, .search, .labels, .settings] + meetings.map { .meeting($0.id) }
+            let targets: [Destination] = [.home, .labels, .calendar, .settings] + meetings.map { .meeting($0.id) }
             let index = targets.firstIndex(of: focusedDestination ?? .home) ?? 0
             switch direction {
             case .down: focusedDestination = targets[min(index + 1, targets.count - 1)]
@@ -114,10 +121,19 @@ struct SidebarView: View {
         let target = Destination.meeting(meeting.id)
         let isRecording = recordingMeetingID == meeting.id
         return HStack(spacing: 8) {
-            Image(systemName: "text.bubble").accessibilityHidden(true)
+            Image(systemName: "text.bubble")
+                .foregroundStyle(Color.meetingAccent)
+                .accessibilityHidden(true)
             InlineMeetingName(meeting: meeting, origin: .sidebar, editor: $editor,
                               isSaving: isSaving, begin: { rename(meeting.id) }, save: save, cancel: cancel)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            if meeting.calendarEventDate != nil {
+                Image(systemName: "calendar")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+                    .help("Created from a calendar event")
+                    .accessibilityHidden(true)
+            }
             if !meeting.tags.isEmpty {
                 Image(systemName: "tag")
                     .font(.caption2)
@@ -141,14 +157,7 @@ struct SidebarView: View {
         .onKeyPress(.return) { guard editor == nil else { return .ignored }; navigate(target); return .handled }
         .onKeyPress(.space) { guard editor == nil else { return .ignored }; navigate(target); return .handled }
         .focusedValue(\.renameMeeting, editor == nil && !isSaving ? { rename(meeting.id) } : nil)
-        .contextMenu {
-            Button("Rename") { rename(meeting.id) }
-            Button("Edit Description…", systemImage: "text.alignleft") { editDescription(meeting.id) }
-            Button("Labels…", systemImage: "tag") { editTags(meeting.id) }
-            Button("Copy Link as Markdown", systemImage: "link") { copyMeetingLink(meeting) }
-            Button("Delete Meeting…", role: .destructive) { delete(meeting.id) }
-                .disabled(!canDelete(meeting.id))
-        }
+        .contextMenu { meetingActions(meeting) }
         .accessibilityElement(children: editor?.id == meeting.id ? .contain : .combine)
         .accessibilityLabel(editor?.id == meeting.id ? "" : meeting.name)
         .accessibilityValue(accessibilityValue(for: meeting, isRecording: isRecording))
@@ -158,23 +167,17 @@ struct SidebarView: View {
             navigate(target)
         }
         .accessibilityAction(named: Text("Rename")) { rename(meeting.id) }
-        .accessibilityAction(named: Text("Edit Description")) { editDescription(meeting.id) }
-        .accessibilityAction(named: Text("Labels")) { editTags(meeting.id) }
-        .accessibilityAction(named: Text("Copy Link as Markdown")) { copyMeetingLink(meeting) }
+        .accessibilityAction(named: Text("Edit Meeting")) { meetingActions(meeting).edit() }
+        .accessibilityAction(named: Text("Copy Link as Markdown")) { meetingActions(meeting).copyLink() }
         .onChange(of: editor == nil) { wasClosed, isClosed in
             if !wasClosed && isClosed && destination == target { focusedDestination = target }
         }
     }
 
-    private func copyMeetingLink(_ meeting: Meeting) {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(MeetingLink.markdown(for: meeting), forType: .string)
-    }
-
     private func accessibilityValue(for meeting: Meeting, isRecording: Bool) -> String {
         var values: [String] = []
         if !meeting.tags.isEmpty { values.append("Labels: \(meeting.tags.map(\.name).joined(separator: ", "))") }
+        if meeting.calendarEventDate != nil { values.append("Calendar event attached") }
         if isRecording { values.append("Recording") }
         return values.joined(separator: ", ")
     }
@@ -193,11 +196,16 @@ struct SidebarView: View {
         .focusable()
         .focused($focusedDestination, equals: target)
         .help(title)
-        .accessibilityAddTraits(destination == target ? .isSelected : [])
+        .accessibilityAddTraits(isSelected(target) ? .isSelected : [])
+    }
+
+    private func isSelected(_ target: Destination) -> Bool {
+        if case .label = destination { return target == .labels }
+        return destination == target
     }
 
     private func rowBackground(for target: Destination) -> Color {
-        if destination == target { return Color.accentColor.opacity(0.16) }
+        if isSelected(target) { return Color.accentColor.opacity(0.16) }
         if focusedDestination == target && editor == nil { return Color.primary.opacity(0.08) }
         return .clear
     }

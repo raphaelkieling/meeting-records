@@ -106,33 +106,18 @@ struct InputsView: View {
         let playing = playback.activeID == recording.id
         let action = playing ? "Stop" : "Play"
 
-        return HStack(alignment: .top, spacing: 12) {
+        return HStack(alignment: .center, spacing: 12) {
             Image(systemName: "waveform")
                 .font(.title3)
                 .foregroundStyle(Color.meetingAccent)
                 .frame(width: 38, height: 38)
                 .background(Color.meetingAccent.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
-                    Text(title).font(.headline)
-                    Spacer(minLength: 8)
-                    Button {
-                        playback.toggle(recording.id, store: store)
-                    } label: {
-                        Image(systemName: playing ? "stop.fill" : "play.fill")
-                            .frame(width: 24, height: 24)
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(active)
-                    .accessibilityLabel("\(action) \(title)")
-                    .help(active ? "Playback is available after recording." : action)
-                }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.headline)
                 HStack(spacing: 8) {
                     Text(status.rawValue)
-                        .font(.caption.weight(.medium))
+                        .font(.caption)
                         .foregroundStyle(.secondary)
-                        .padding(.horizontal, 7).padding(.vertical, 3)
-                        .background(.quaternary, in: Capsule())
                         .accessibilityLabel("Transcription: \(status.rawValue)")
                     Spacer(minLength: 8)
                     Text(recording.startedAt.formatted(date: .abbreviated, time: .shortened))
@@ -150,6 +135,17 @@ struct InputsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            Spacer(minLength: 8)
+            Button {
+                playback.toggle(recording.id, store: store)
+            } label: {
+                Image(systemName: playing ? "stop.fill" : "play.fill")
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.bordered)
+            .disabled(active)
+            .accessibilityLabel("\(action) \(title)")
+            .help(active ? "Playback is available after recording." : action)
         }
         .padding(12)
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
@@ -179,7 +175,7 @@ struct InputsView: View {
             }
             .padding(12)
             .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.meetingAccent.opacity(0.45), lineWidth: 1.5))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.secondary.opacity(0.18), lineWidth: 1))
             .contentShape(RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.plain)
