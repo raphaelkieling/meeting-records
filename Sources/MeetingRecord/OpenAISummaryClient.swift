@@ -55,15 +55,15 @@ enum OpenAISummaryError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .invalidKey: "Enter an OpenAI API key without spaces or line breaks."
-        case .missingKey: "Save an OpenAI API key in Settings → Summarization."
+        case .missingKey: "Save an OpenAI API key in the model settings."
         case .keychain(let status): "Could not access the macOS Keychain (code \(status))."
         case .unauthorized: "OpenAI rejected the API key. Check its permissions or replace it in Settings."
         case .modelUnavailable: "This model is unavailable for your OpenAI API project. Choose another model in Settings."
         case .rateLimited: "OpenAI reported a rate or quota limit. Check API billing or try again later."
-        case .responseIncomplete: "OpenAI did not finish the summary. Try again or choose another model."
-        case .emptyResponse: "OpenAI returned no summary text."
-        case .contextOverflow: "The transcript exceeds the OpenAI model's context window."
-        case .requestFailed(let code): "Could not generate a summary with OpenAI (HTTP \(code))."
+        case .responseIncomplete: "OpenAI did not finish the response. Try again or choose another model."
+        case .emptyResponse: "OpenAI returned no text."
+        case .contextOverflow: "The input exceeds the OpenAI model's context window."
+        case .requestFailed(let code): "Could not get a response from OpenAI (HTTP \(code))."
         }
     }
 }
@@ -106,7 +106,10 @@ struct OpenAISummaryClient {
         request.timeoutInterval = 120
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let reasoning = model == .gpt6Luna ? RequestBody.Reasoning(effort: "low") : nil
+        let reasoning: RequestBody.Reasoning? = switch model {
+        case .gpt62Astra, .gpt62Sol, .gpt61Terra, .gpt6Luna: .init(effort: "low")
+        case .appleIntelligence, .gpt54Mini, .gpt54Nano: nil
+        }
         request.httpBody = try JSONEncoder().encode(RequestBody(
             model: model.rawValue, instructions: instructions, input: input, reasoning: reasoning))
 

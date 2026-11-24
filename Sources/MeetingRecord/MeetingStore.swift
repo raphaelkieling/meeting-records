@@ -4,6 +4,7 @@ import SQLite3
 
 actor MeetingStore {
     private let databaseURL: URL?
+    private var didOpenChatIndex = false
 
     init(databaseURL: URL? = nil) {
         self.databaseURL = databaseURL
@@ -62,7 +63,8 @@ actor MeetingStore {
     }
 
     func createMeeting(id: UUID, name: String, description: String? = nil,
-                       calendarEventDate: Date? = nil, calendarName: String? = nil) throws -> Meeting {
+                       calendarEventDate: Date? = nil, calendarName: String? = nil,
+                       calendarDetails: CalendarEventDetails? = nil) throws -> Meeting {
         let name = try Meeting.normalizedName(name)
         let description = Meeting.normalizedDescription(description)
         return try withDatabase { db in
@@ -83,11 +85,16 @@ actor MeetingStore {
                 try check(sqlite3_bind_double(statement, 5, time.timeIntervalSince1970))
                 try finish(statement)
                 if let calendarEventDate, let calendarName {
-                    let source = try prepare("INSERT INTO calendar_meeting_inputs(meetingID, eventDate, calendarName) VALUES (?, ?, ?)", db: db)
+                    let source = try prepare("""
+                        INSERT INTO calendar_meeting_inputs(meetingID, eventDate, calendarName, details)
+                        VALUES (?, ?, ?, ?)
+                        """, db: db)
                     defer { sqlite3_finalize(source) }
                     try bind(id.uuidString, at: 1, to: source)
                     try check(sqlite3_bind_double(source, 2, calendarEventDate.timeIntervalSince1970))
                     try bind(calendarName, at: 3, to: source)
+                    let encoded = try calendarDetails.map { try String(decoding: JSONEncoder().encode($0), as: UTF8.self) }
+                    try bind(encoded, at: 4, to: source)
                     try finish(source)
                 }
                 return meeting
@@ -234,6 +241,7 @@ actor MeetingStore {
                 guard try !exists("SELECT 1 FROM recordings WHERE \(owner) AND endedAt IS NULL", id: id, db: db)
                 else { throw MeetingStoreError.meetingRecording }
 
+                try removeChatMeetingData(id, db: db)
                 try execute("DELETE FROM recordings WHERE \(owner)", id: id, db: db)
                 try execute("DELETE FROM meetings WHERE upper(id) = ?", id: id, db: db)
                 guard sqlite3_changes(db) == 1 else { throw MeetingStoreError.notFound }
@@ -250,6 +258,7 @@ actor MeetingStore {
                     guard try !exists("SELECT 1 FROM recordings WHERE upper(meetingID) = ? AND endedAt IS NULL LIMIT 1",
                                       id: id, db: db)
                     else { throw MeetingStoreError.meetingRecording }
+                    try removeChatMeetingData(id, db: db)
                     try execute("DELETE FROM recordings WHERE upper(meetingID) = ?", id: id, db: db)
                     try execute("DELETE FROM meetings WHERE upper(id) = ?", id: id, db: db)
                     try execute("INSERT INTO pending_meeting_deletions VALUES (?)", id: id, db: db)
@@ -314,15 +323,15 @@ actor MeetingStore {
         let version = sqlite3_column_int(statement, 0)
         sqlite3_finalize(statement)
         guard step == SQLITE_ROW else { throw MeetingStoreError.sqlite(step) }
-        guard (0...8).contains(version) else { throw MeetingStoreError.incompatibleVersion }
+        guard (0...10).contains(version) else { throw MeetingStoreError.incompatibleVersion }
         return version
     }
 
     private func ensureSchema(db: OpaquePointer) throws {
-        guard try schemaVersion(db: db) < 8 else { return }
+        guard try schemaVersion(db: db) < 10 else { return }
         try transaction(db: db) {
             let version = try schemaVersion(db: db)
-            guard version < 8 else { return }
+            guard version < 10 else { return }
             if version < 3 {
                 if version == 0 {
                     try execute("""
@@ -402,6 +411,13 @@ actor MeetingStore {
             if version < 8 {
                 try execute("CREATE TABLE calendar_meeting_inputs(meetingID TEXT PRIMARY KEY NOT NULL REFERENCES meetings(id) ON DELETE CASCADE, eventDate REAL NOT NULL, calendarName TEXT NOT NULL); PRAGMA user_version = 8;", db: db)
             }
+            if version < 9 {
+                try execute("""
+                    ALTER TABLE calendar_meeting_inputs ADD COLUMN details TEXT;
+                    PRAGMA user_version = 9;
+                    """, db: db)
+            }
+            if version < 10 { try createChatTables(db) }
         }
     }
 
@@ -791,7 +807,8 @@ extension MeetingStore {
                 try bind(id.uuidString, at: 1, to: pause)
                 try finish(pause)
                 let statement = try prepare("""
-                    INSERT INTO transcript_jobs VALUES (?, 'Transcribing', ?, ?, NULL, unixepoch())
+                    INSERT INTO transcript_jobs(inputID, status, modelID, modelVersion, lastError, updatedAt)
+                    VALUES (?, 'Transcribing', ?, ?, NULL, unixepoch())
                     ON CONFLICT(inputID) DO UPDATE SET status = 'Transcribing', updatedAt = unixepoch(),
                         modelID = excluded.modelID, modelVersion = excluded.modelVersion
                     WHERE status != 'Transcribing' OR modelID != excluded.modelID OR modelVersion != excluded.modelVersion
@@ -953,10 +970,53 @@ extension MeetingStore {
                     revision.update(data: Data("\(passage.id):\(passage.startOffset):\(passage.endOffset):\(passage.text.utf8.count):".utf8))
                     revision.update(data: Data(passage.text.utf8))
                 }
-                return .init(summary: saved, transcript: transcript,
+                let context = try summaryContext(for: meetingID, db: db)
+                if !context.isEmpty {
+                    revision.update(data: Data("\nMeeting context:\n".utf8))
+                    revision.update(data: Data(context.utf8))
+                }
+                return .init(summary: saved, transcript: transcript, context: context,
                              transcriptRevision: revision.finalize().description, hasPendingAudio: pending)
             }
         }
+    }
+
+    private func summaryContext(for meetingID: UUID, db: OpaquePointer) throws -> String {
+        let statement = try prepare("""
+            SELECT m.name, m.description, ci.calendarName, ci.eventDate, ci.details
+            FROM meetings m LEFT JOIN calendar_meeting_inputs ci ON ci.meetingID = m.id
+            WHERE upper(m.id) = ?
+            """, db: db)
+        defer { sqlite3_finalize(statement) }
+        try bind(meetingID.uuidString, at: 1, to: statement)
+        let result = sqlite3_step(statement)
+        if result == SQLITE_DONE { return "" }
+        guard result == SQLITE_ROW else { throw MeetingStoreError.sqlite(result) }
+
+        let title = text(statement, column: 0)
+        let description = text(statement, column: 1)
+        let details = try text(statement, column: 4).map {
+            try JSONDecoder().decode(CalendarEventDetails.self, from: Data($0.utf8))
+        }
+        let start = sqlite3_column_type(statement, 3) == SQLITE_NULL ? nil
+            : Date(timeIntervalSince1970: sqlite3_column_double(statement, 3))
+        let attendees = details?.attendees.joined(separator: ", ")
+        let fields: [(String, String?, Int)] = [
+            ("Meeting title", title, 200),
+            ("Calendar title", details?.title == title ? nil : details?.title, 200),
+            ("Calendar", text(statement, column: 2), 100),
+            ("Scheduled start", start?.ISO8601Format(), 50),
+            ("Scheduled end", details?.endDate?.ISO8601Format(), 50),
+            ("Organizer", details?.organizer, 150),
+            ("Invitees", attendees, 700),
+            ("Meeting description", description, 1200),
+            ("Calendar description", details?.notes == description ? nil : details?.notes, 1200)
+        ]
+        // Leave room for transcript chunks in the on-device model's context window.
+        return fields.compactMap { label, value, limit in
+            guard let value, !value.isEmpty else { return nil }
+            return "\(label): \(String(decoding: value.utf8.prefix(limit), as: UTF8.self))"
+        }.joined(separator: "\n")
     }
 
     func saveSummary(_ summary: MeetingSummary, for meetingID: UUID) throws {
@@ -1061,5 +1121,360 @@ extension MeetingStore {
         let length = min(source.length - start, 180)
         let excerpt = source.substring(with: NSRange(location: start, length: length))
         return (start > 0 ? "…" : "") + excerpt + (start + length < source.length ? "…" : "")
+    }
+}
+
+extension MeetingStore {
+    private func createChatTables(_ db: OpaquePointer) throws {
+        try execute("""
+            ALTER TABLE transcript_jobs ADD COLUMN chatRevision INTEGER NOT NULL DEFAULT 0;
+            CREATE TRIGGER chat_revision_insert AFTER INSERT ON transcript_segments BEGIN
+                UPDATE transcript_jobs SET chatRevision = chatRevision + 1 WHERE inputID = NEW.inputID;
+            END;
+            CREATE TRIGGER chat_revision_update AFTER UPDATE ON transcript_segments BEGIN
+                UPDATE transcript_jobs SET chatRevision = chatRevision + 1 WHERE inputID = NEW.inputID;
+            END;
+            CREATE TRIGGER chat_revision_delete AFTER DELETE ON transcript_segments BEGIN
+                UPDATE transcript_jobs SET chatRevision = chatRevision + 1 WHERE inputID = OLD.inputID;
+            END;
+            CREATE TABLE chat_indexed (
+                recordingID TEXT PRIMARY KEY NOT NULL REFERENCES recordings(id) ON DELETE CASCADE,
+                revision INTEGER NOT NULL
+            );
+            CREATE TABLE chat_chunks (
+                id INTEGER PRIMARY KEY,
+                recordingID TEXT NOT NULL REFERENCES chat_indexed(recordingID) ON DELETE CASCADE,
+                passageIDs TEXT NOT NULL,
+                startOffset INTEGER NOT NULL CHECK(startOffset >= 0),
+                endOffset INTEGER NOT NULL CHECK(endOffset >= startOffset)
+            );
+            CREATE INDEX chat_chunks_recording ON chat_chunks(recordingID);
+            CREATE TABLE chat_conversations (
+                id TEXT PRIMARY KEY NOT NULL, title TEXT NOT NULL CHECK(length(trim(title)) > 0),
+                scope TEXT, updatedAt REAL NOT NULL
+            );
+            CREATE TABLE chat_messages (
+                id TEXT PRIMARY KEY NOT NULL,
+                conversationID TEXT NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+                role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+                body TEXT NOT NULL, status TEXT NOT NULL,
+                requestID TEXT, citations TEXT NOT NULL DEFAULT '[]',
+                UNIQUE(conversationID, ordinal),
+                CHECK((role = 'user' AND requestID IS NULL AND status = 'complete' AND length(trim(body)) > 0)
+                      OR (role = 'assistant' AND requestID IS NOT NULL))
+            );
+            CREATE TABLE chat_sources (
+                messageID TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+                meetingID TEXT NOT NULL,
+                PRIMARY KEY(messageID, meetingID)
+            );
+            CREATE INDEX chat_sources_meeting ON chat_sources(meetingID);
+            PRAGMA user_version = 10;
+            """, db: db)
+    }
+
+    func loadChatHistory(recovering: Bool = false) throws -> [ChatConversation] {
+        try withDatabase { db in
+            try transaction(db: db, readOnly: !recovering) {
+                if recovering {
+                    try execute("UPDATE chat_messages SET status = 'interrupted' WHERE status IN ('pending', 'streaming')", db: db)
+                }
+                let threads = try chatRows("SELECT id, title, scope, updatedAt FROM chat_conversations ORDER BY updatedAt DESC, id",
+                                           db: db) { row -> ChatConversation in
+                    guard let id = text(row, column: 0).flatMap(UUID.init(uuidString:)),
+                          let title = text(row, column: 1) else { throw MeetingStoreError.invalidRecord }
+                    return ChatConversation(id: id, title: title,
+                        scope: text(row, column: 2).flatMap(UUID.init(uuidString:)),
+                        updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(row, 3)))
+                }
+                return try threads.map { conversation in
+                    var thread = conversation
+                    thread.messages = try chatRows("""
+                        SELECT m.id, m.role, m.body, m.status, m.requestID, m.citations,
+                            (SELECT group_concat(s.meetingID) FROM chat_sources s WHERE s.messageID = m.id)
+                        FROM chat_messages m WHERE m.conversationID = ? ORDER BY m.ordinal
+                        """, [thread.id.uuidString], db: db) { row in
+                        guard let id = text(row, column: 0).flatMap(UUID.init(uuidString:)),
+                              let role = text(row, column: 1).flatMap(ChatMessage.Role.init(rawValue:)),
+                              let body = text(row, column: 2),
+                              let status = text(row, column: 3).flatMap(ChatMessage.Status.init(rawValue:)),
+                              let citations = text(row, column: 5) else { throw MeetingStoreError.invalidRecord }
+                        var message = ChatMessage(id: id, role: role, body: body, status: status,
+                                                  requestID: text(row, column: 4).flatMap(UUID.init(uuidString:)))
+                        message.citations = try JSONDecoder().decode([ChatCitation].self, from: Data(citations.utf8))
+                        message.sourceIDs = Set((text(row, column: 6) ?? "").split(separator: ",")
+                            .compactMap { UUID(uuidString: String($0)) })
+                        return message
+                    }
+                    return thread
+                }
+            }
+        }
+    }
+
+    func saveChat(_ thread: ChatConversation, changed: Int, create: Bool) throws {
+        try withDatabase { db in
+            try transaction(db: db) {
+                let threadID = thread.id.uuidString
+                let info = [thread.title, thread.scope?.uuidString, String(thread.updatedAt.timeIntervalSince1970), threadID]
+                if create {
+                    try chatWrite("INSERT INTO chat_conversations(title, scope, updatedAt, id) VALUES (?, ?, ?, ?)", info, db: db)
+                } else {
+                    try chatWrite("UPDATE chat_conversations SET title = ?, scope = ?, updatedAt = ? WHERE id = ?", info, db: db)
+                    guard sqlite3_changes(db) == 1 else { return }
+                }
+                for (ordinal, value) in thread.messages.enumerated().suffix(changed) {
+                    var message = value
+                    let sources = message.sourceIDs.union(message.citations.map(\.meetingID))
+                    for id in sources where try !exists("SELECT 1 FROM meetings WHERE upper(id) = ?", id: id, db: db) {
+                        message.status = .sourceRemoved
+                        message.body = ""
+                        message.citations = []
+                        break
+                    }
+                    try chatWrite("""
+                        INSERT INTO chat_messages(id, conversationID, ordinal, role, body, status, requestID, citations)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(id) DO UPDATE SET body = excluded.body, status = excluded.status, citations = excluded.citations
+                        WHERE chat_messages.status IN ('pending', 'streaming') AND chat_messages.requestID = excluded.requestID
+                        """, [message.id.uuidString, threadID, String(ordinal), message.role.rawValue,
+                              message.body, message.status.rawValue, message.requestID?.uuidString,
+                              try chatJSON(message.citations)], db: db)
+                    guard sqlite3_changes(db) == 1 else { continue }
+                    if message.status == .sourceRemoved {
+                        try execute("DELETE FROM chat_sources WHERE messageID = ?", id: message.id, db: db)
+                    } else {
+                        for id in sources {
+                            try chatWrite("INSERT OR IGNORE INTO chat_sources VALUES (?, ?)",
+                                          [message.id.uuidString, id.uuidString], db: db)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func deleteChat(_ id: UUID) throws {
+        try withDatabase { try execute("DELETE FROM chat_conversations WHERE id = ?", id: id, db: $0) }
+    }
+
+    private func removeChatMeetingData(_ id: UUID, db: OpaquePointer) throws {
+        try execute("""
+            UPDATE chat_messages SET body = '', status = 'sourceRemoved', citations = '[]'
+            WHERE id IN (SELECT messageID FROM chat_sources WHERE meetingID = ?)
+            """, id: id, db: db)
+        try execute("""
+            DELETE FROM chat_sources WHERE messageID IN (SELECT id FROM chat_messages WHERE status = 'sourceRemoved')
+            """, db: db)
+        if sqlite3_compileoption_used("ENABLE_FTS5") != 0,
+           !(try chatRows("SELECT 1 FROM sqlite_master WHERE name = 'chat_fts'", db: db) { _ in true }).isEmpty {
+            try execute("""
+                DELETE FROM chat_fts WHERE rowid IN (
+                    SELECT c.id FROM chat_chunks c JOIN recordings r ON r.id = c.recordingID WHERE upper(r.meetingID) = ?
+                )
+                """, id: id, db: db)
+        }
+    }
+
+    private func chatRows<T>(_ sql: String, _ parameters: [String?] = [], db: OpaquePointer,
+                             read: (OpaquePointer) throws -> T) throws -> [T] {
+        let statement = try prepare(sql, db: db)
+        defer { sqlite3_finalize(statement) }
+        for (index, parameter) in parameters.enumerated() {
+            try bind(parameter, at: Int32(index + 1), to: statement)
+        }
+        var rows: [T] = []
+        while true {
+            let code = sqlite3_step(statement)
+            if code == SQLITE_DONE { return rows }
+            guard code == SQLITE_ROW else { throw MeetingStoreError.sqlite(code) }
+            rows.append(try read(statement))
+        }
+    }
+
+    private func chatWrite(_ sql: String, _ parameters: [String?], db: OpaquePointer) throws {
+        let statement = try prepare(sql, db: db)
+        defer { sqlite3_finalize(statement) }
+        for (index, parameter) in parameters.enumerated() {
+            try bind(parameter, at: Int32(index + 1), to: statement)
+        }
+        try finish(statement)
+    }
+
+    private func chatJSON(_ value: some Encodable) throws -> String {
+        try String(decoding: JSONEncoder().encode(value), as: UTF8.self)
+    }
+}
+
+extension MeetingStore {
+    func chatIndexAvailable() throws -> Bool {
+        if didOpenChatIndex { return true }
+        return try withDatabase { db in
+            do {
+                try execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS chat_fts
+                    USING fts5(body, tokenize = 'unicode61 remove_diacritics 2')
+                    """, db: db)
+            } catch {
+                if String(cString: sqlite3_errmsg(db)).contains("no such module: fts5") { return false }
+                throw error
+            }
+            try execute("DELETE FROM chat_fts WHERE rowid NOT IN (SELECT id FROM chat_chunks)", db: db)
+            didOpenChatIndex = true
+            return true
+        }
+    }
+
+    func staleChatRecordings() throws -> [UUID] {
+        guard try chatIndexAvailable() else { return [] }
+        return try withDatabase { db in
+            try chatRows("""
+                SELECT r.id FROM recordings r JOIN transcript_jobs j ON j.inputID = r.id
+                LEFT JOIN chat_indexed c ON c.recordingID = r.id
+                WHERE r.endedAt IS NOT NULL AND j.status = 'Complete' AND c.revision IS NOT j.chatRevision
+                ORDER BY r.startedAt DESC, r.id
+                """, db: db) { row in
+                guard let id = text(row, column: 0).flatMap(UUID.init(uuidString:)) else { throw MeetingStoreError.invalidRecord }
+                return id
+            }
+        }
+    }
+
+    func chatIndexInput(_ id: UUID) throws -> (revision: Int64, passages: [TranscriptPassage])? {
+        try withDatabase { db in
+            try transaction(db: db, readOnly: true) {
+                guard let revision = try chatRecordingRevision(id, db: db) else { return nil }
+                let passages = try chatRows("""
+                    SELECT source, checkpoint, sequence, startOffset, endOffset, text FROM transcript_segments
+                    WHERE inputID = ? ORDER BY startOffset, source, checkpoint, sequence
+                    """, [id.uuidString], db: db) { row in
+                    guard let source = text(row, column: 0).flatMap(AudioSegment.Source.init(rawValue:)),
+                          let body = text(row, column: 5) else { throw MeetingStoreError.invalidRecord }
+                    return TranscriptPassage(inputID: id, source: source, checkpoint: sqlite3_column_int64(row, 1),
+                        sequence: sqlite3_column_int64(row, 2), startOffset: sqlite3_column_int64(row, 3),
+                        endOffset: sqlite3_column_int64(row, 4), text: body)
+                }
+                return (revision, passages)
+            }
+        }
+    }
+
+    func replaceChatIndex(_ id: UUID, revision: Int64, chunks: [TranscriptChunk]) throws {
+        try withDatabase { db in
+            try transaction(db: db) {
+                guard try chatRecordingRevision(id, db: db) == revision else { return }
+                let indexed = try chatRows("SELECT revision FROM chat_indexed WHERE recordingID = ?",
+                                           [id.uuidString], db: db) { sqlite3_column_int64($0, 0) }.first
+                guard indexed != revision else { return }
+                try execute("DELETE FROM chat_fts WHERE rowid IN (SELECT id FROM chat_chunks WHERE recordingID = ?)",
+                            id: id, db: db)
+                try execute("DELETE FROM chat_indexed WHERE recordingID = ?", id: id, db: db)
+                try chatWrite("INSERT INTO chat_indexed VALUES (?, ?)", [id.uuidString, String(revision)], db: db)
+                for chunk in chunks {
+                    try chatWrite("""
+                        INSERT INTO chat_chunks(recordingID, passageIDs, startOffset, endOffset) VALUES (?, ?, ?, ?)
+                        """, [id.uuidString, try chatJSON(chunk.passageIDs), String(chunk.startOffset),
+                              String(chunk.endOffset)], db: db)
+                    let rowID = sqlite3_last_insert_rowid(db)
+                    try chatWrite("INSERT INTO chat_fts(rowid, body) VALUES (?, ?)", [String(rowID), chunk.body], db: db)
+                }
+            }
+        }
+    }
+
+    func chatEvidence(terms: [String], scope: UUID?, candidates: [UUID] = [],
+                      from: Date? = nil, until: Date? = nil) throws -> [ChatEvidence] {
+        let match = MeetingChatRetrieval.match(terms)
+        guard !match.isEmpty, try chatIndexAvailable() else { return [] }
+        let candidates = Array(candidates.prefix(12))
+        let candidateFilter = candidates.isEmpty ? "" :
+            "AND upper(r.meetingID) IN (\(Array(repeating: "?", count: candidates.count).joined(separator: ",")))"
+        let start = from.map { String($0.timeIntervalSince1970) }
+        let end = until.map { String($0.timeIntervalSince1970) }
+        return try withDatabase { db in
+            try chatRows("""
+                SELECT r.meetingID, r.id, c.passageIDs, c.startOffset, j.chatRevision, m.name, f.body
+                FROM chat_fts f JOIN chat_chunks c ON c.id = f.rowid
+                JOIN chat_indexed x ON x.recordingID = c.recordingID
+                JOIN recordings r ON r.id = c.recordingID JOIN meetings m ON m.id = r.meetingID
+                JOIN transcript_jobs j ON j.inputID = r.id
+                LEFT JOIN calendar_meeting_inputs ci ON ci.meetingID = m.id
+                WHERE chat_fts MATCH ? AND j.status = 'Complete' AND x.revision = j.chatRevision
+                  AND (? IS NULL OR upper(r.meetingID) = ?)
+                  AND (? IS NULL OR coalesce(ci.eventDate, r.startedAt) >= CAST(? AS REAL))
+                  AND (? IS NULL OR coalesce(ci.eventDate, r.startedAt) < CAST(? AS REAL))
+                  \(candidateFilter)
+                ORDER BY bm25(chat_fts), r.startedAt DESC, c.startOffset LIMIT 6
+                """, [match, scope?.uuidString, scope?.uuidString, start, start, end, end] + candidates.map(\.uuidString), db: db) { row in
+                guard let meetingID = text(row, column: 0).flatMap(UUID.init(uuidString:)),
+                      let recordingID = text(row, column: 1).flatMap(UUID.init(uuidString:)),
+                      let ids = text(row, column: 2), let title = text(row, column: 5),
+                      let body = text(row, column: 6) else { throw MeetingStoreError.invalidRecord }
+                return ChatEvidence(title: title, body: body, citation: ChatCitation(meetingID: meetingID,
+                    recordingID: recordingID, passageIDs: try JSONDecoder().decode([String].self, from: Data(ids.utf8)),
+                    startOffset: sqlite3_column_int64(row, 3), revision: sqlite3_column_int64(row, 4)))
+            }
+        }
+    }
+
+    func chatMeetingCandidates(terms: [String], scope: UUID?, from: Date?, until: Date?) throws -> [ChatMeetingMatch] {
+        try withDatabase { db in
+            try transaction(db: db, readOnly: true) {
+                let candidates = try chatRows("""
+                    SELECT m.id, m.name, m.description, coalesce(ci.eventDate, m.createdAt), ci.details,
+                        (SELECT group_concat(t.name, char(10)) FROM meeting_tags mt JOIN tags t ON t.id = mt.tagID WHERE mt.meetingID = m.id),
+                        ci.calendarName
+                    FROM meetings m LEFT JOIN calendar_meeting_inputs ci ON ci.meetingID = m.id
+                    WHERE (? IS NULL OR upper(m.id) = ?)
+                    ORDER BY coalesce(ci.eventDate, m.createdAt) DESC, m.id
+                    """, [scope?.uuidString, scope?.uuidString], db: db) { row -> ChatMeetingMatch in
+                    guard let id = text(row, column: 0).flatMap(UUID.init(uuidString:)),
+                          let title = text(row, column: 1) else { throw MeetingStoreError.invalidRecord }
+                    let invite = text(row, column: 4).flatMap {
+                        try? JSONDecoder().decode(CalendarEventDetails.self, from: Data($0.utf8))
+                    }
+                    let notes = text(row, column: 2) ?? invite?.notes
+                    return ChatMeetingMatch(id: id, title: String(title.prefix(200)),
+                        date: Date(timeIntervalSince1970: sqlite3_column_double(row, 3)),
+                        description: notes.map { String($0.prefix(240)) },
+                        tags: (text(row, column: 5) ?? "").components(separatedBy: .newlines).filter { !$0.isEmpty },
+                        invitees: (invite?.attendees ?? []) + [invite?.organizer].compactMap { $0 })
+                }
+                let terms = MeetingChatRetrieval.terms(from: terms.joined(separator: " ")).prefix(16)
+                return candidates.compactMap { meeting -> (ChatMeetingMatch, Int)? in
+                    if let from, meeting.date < from { return nil }
+                    if let until, meeting.date >= until { return nil }
+                    let metadata = ([meeting.title, meeting.description ?? ""] + meeting.tags + meeting.invitees)
+                        .joined(separator: " ")
+                    let score = terms.filter { metadata.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }.count
+                    return terms.isEmpty || score > 0 ? (meeting, score) : nil
+                }.sorted { left, right in
+                    left.1 == right.1 ? left.0.date > right.0.date : left.1 > right.1
+                }.prefix(8).map(\.0)
+            }
+        }
+    }
+
+    func isChatCitationCurrent(_ citation: ChatCitation) throws -> Bool {
+        guard let first = citation.passageIDs.first else { return false }
+        return try withDatabase { db in
+            guard try chatRecordingRevision(citation.recordingID, db: db) == citation.revision else { return false }
+            let rows = try chatRows("""
+                SELECT 1 FROM transcript_segments s JOIN recordings r ON r.id = s.inputID
+                WHERE r.id = ? AND upper(r.meetingID) = ?
+                  AND upper(s.inputID) || ':' || s.source || ':' || s.checkpoint || ':' || s.sequence = ?
+                  AND s.startOffset = ?
+                """, [citation.recordingID.uuidString, citation.meetingID.uuidString, first,
+                      String(citation.startOffset)], db: db) { _ in true }
+            return !rows.isEmpty
+        }
+    }
+
+    private func chatRecordingRevision(_ id: UUID, db: OpaquePointer) throws -> Int64? {
+        try chatRows("""
+            SELECT j.chatRevision FROM transcript_jobs j JOIN recordings r ON r.id = j.inputID
+            WHERE r.id = ? AND r.endedAt IS NOT NULL AND j.status = 'Complete'
+            """, [id.uuidString], db: db) { sqlite3_column_int64($0, 0) }.first
     }
 }

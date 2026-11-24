@@ -6,6 +6,8 @@ struct TranscriptionView: View {
     let store: MeetingStore
     let recordingRevision: Int
     @ObservedObject var transcription: TranscriptionCoordinator
+    var citedPassageID: String?
+    var citedPassageRevision: Int
     @State private var inputs: [Recording] = []
     @State private var passages: [UUID: [TranscriptPassage]] = [:]
     @State private var statuses: [UUID: TranscriptStatus] = [:]
@@ -14,6 +16,27 @@ struct TranscriptionView: View {
     @State private var hasMoreTranscriptionBelow = false
 
     var body: some View {
+        ScrollViewReader { proxy in
+            transcript
+                .task(id: "\(citedPassageRevision)-\(hasLoaded)") {
+                    guard hasLoaded, let citedPassageID else { return }
+                    for _ in 0..<30 {
+                        guard !Task.isCancelled else { return }
+                        if passages.values.contains(where: { $0.contains(where: { $0.id == citedPassageID }) }) {
+                            await Task.yield()
+                            guard !Task.isCancelled else { return }
+                            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
+                                proxy.scrollTo(citedPassageID, anchor: .center)
+                            }
+                            return
+                        }
+                        try? await Task.sleep(for: .milliseconds(40))
+                    }
+                }
+        }
+    }
+
+    private var transcript: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
                 if let error {
@@ -31,6 +54,14 @@ struct TranscriptionView: View {
                                         .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                                     Text(passage.text).textSelection(.enabled)
                                 }
+                                .overlay(alignment: .leading) {
+                                    if passage.id == citedPassageID {
+                                        Circle().fill(Color.meetingAccent).frame(width: 8, height: 8)
+                                            .offset(x: -12)
+                                            .accessibilityLabel("Referenced passage")
+                                    }
+                                }
+                                .id(passage.id)
                             }
                         } header: {
                             VStack(alignment: .leading, spacing: 4) {

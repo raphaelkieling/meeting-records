@@ -6,6 +6,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     case general = "General"
     case models = "Models"
     case summarization = "Summarization"
+    case chat = "Chat"
     case data = "Data"
 
     var id: Self { self }
@@ -15,6 +16,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .general: "slider.horizontal.3"
         case .models: "waveform"
         case .summarization: "sparkles"
+        case .chat: "bubble.left.and.bubble.right"
         case .data: "externaldrive"
         }
     }
@@ -97,6 +99,8 @@ struct SettingsView: View {
             TranscriptionModelSettings(transcription: transcription)
         case .summarization:
             SummarizationSettings()
+        case .chat:
+            ChatSettingsView()
         case .data:
             VStack(alignment: .leading, spacing: 12) {
                 Text("Permanently remove all meetings and their saved recordings, transcripts, and summaries from this Mac.")
@@ -302,7 +306,7 @@ private struct SummarizationSettings: View {
                     Label("API key saved in Keychain", systemImage: "checkmark.circle")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Text("OpenAI receives transcript text when you request a summary. API usage is billed separately from ChatGPT.")
+                Text("OpenAI receives the transcript, prompt, and meeting details when you request a summary. Meeting details may include calendar descriptions and invitee names. API usage is billed separately from ChatGPT.")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
                 AppleIntelligenceAvailability()

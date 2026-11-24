@@ -25,6 +25,7 @@ final class RecordingCoordinator: ObservableObject {
     let store: MeetingStore
     let transcription: TranscriptionCoordinator
     let summaries: MeetingSummaryCoordinator
+    lazy var chat = MeetingChatCoordinator(store: store)
 
     init() {
         let store = MeetingStore()
@@ -121,12 +122,14 @@ final class RecordingCoordinator: ObservableObject {
         defer { deletingMeetings.remove(id) }
         try await store.deleteMeeting(id)
         summaries.cancel(for: id)
+        chat.meetingsDeleted([id])
     }
 
     func deleteAllMeetings() async throws {
         guard state == .idle, deletingMeetings.isEmpty else { throw RecordingError.alreadyRecording }
         let deletedIDs = try await store.deleteAllMeetings()
         for id in deletedIDs { summaries.cancel(for: id) }
+        chat.meetingsDeleted(Set(deletedIDs))
         revision += 1
     }
 
@@ -158,11 +161,16 @@ final class RecordingCoordinator: ObservableObject {
                 await start(meetingID: meetingID)
             }
         case .recording(let owner) where owner == meetingID:
-            state = .finishing(meetingID)
-            Task { await finish() }
+            stop()
         default:
             break
         }
+    }
+
+    func stop() {
+        guard case .recording(let meetingID) = state else { return }
+        state = .finishing(meetingID)
+        Task { await finish() }
     }
 
     private func start(meetingID: UUID) async {

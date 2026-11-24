@@ -1,11 +1,12 @@
 import SwiftUI
 
 enum Destination: Hashable {
-    case home, labels, calendar, settings, meeting(UUID), label(Tag)
+    case home, chat, labels, calendar, settings, meeting(UUID), label(Tag)
 
     var title: LocalizedStringKey {
         switch self {
         case .home: "Home"
+        case .chat: "Chat"
         case .labels: "Labels"
         case .label(let tag): "\(tag.name)"
         case .calendar: "Calendar"
@@ -63,6 +64,8 @@ struct ContentView: View {
     @State private var meetingEditor: Meeting?
     @State private var calendarFocusDate: Date?
     @State private var isCommandPalettePresented = false
+    @State private var citedPassageID: String?
+    @State private var citationNavigationRevision = 0
     private var store: MeetingStore { recording.store }
 
     private struct HomeLoadKey: Equatable {
@@ -107,7 +110,7 @@ struct ContentView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
+        HSplitView {
             SidebarView(
                 destination: destination, state: state, editor: $editor, isSaving: isSaving,
                 canCreate: canCreate, revealID: revealID, revealVersion: revealVersion,
@@ -119,7 +122,8 @@ struct ContentView: View {
                 save: saveRename, cancel: cancelRename,
                 retry: { Task { await loadMeetings() } }
             )
-            Divider().ignoresSafeArea(.container, edges: .top)
+            .frame(minWidth: 240, maxWidth: 440)
+            .layoutPriority(-1)
             VStack(alignment: .leading, spacing: 20) {
                 if let meeting = selectedMeeting {
                     VStack(alignment: .leading, spacing: 6) {
@@ -159,10 +163,13 @@ struct ContentView: View {
                                     .id(meeting.id)
                             case .transcription:
                                 TranscriptionView(meetingID: meeting.id, store: store,
-                                                  recordingRevision: recording.revision, transcription: transcription)
+                                                  recordingRevision: recording.revision, transcription: transcription,
+                                                  citedPassageID: citedPassageID,
+                                                  citedPassageRevision: citationNavigationRevision)
                                     .id(meeting.id)
                             case .summary:
                                 MeetingSummaryView(meetingID: meeting.id, store: store,
+                                                   meetingUpdatedAt: meeting.updatedAt,
                                                    recordingRevision: recording.revision,
                                                    transcriptionRevision: transcription.revision,
                                                    isRecording: recording.state.meetingID == meeting.id,
@@ -187,7 +194,10 @@ struct ContentView: View {
                 } else {
                     Text(destination.title)
                         .font(.largeTitle.bold())
-                    if destination == .settings {
+                    if destination == .chat {
+                        MeetingChatView(chat: recording.chat, meetings: meetings,
+                                        transcriptRevision: transcription.completionRevision, openCitation: openChatCitation)
+                    } else if destination == .settings {
                         SettingsView(section: $settingsSection, transcription: transcription, recording: recording,
                                      deleteAll: deleteAllMeetingData)
                     } else if case .label(let tag) = destination {
@@ -204,7 +214,7 @@ struct ContentView: View {
                                  retry: { homeRevision += 1 })
                             .task(id: homeLoadKey) { [key = homeLoadKey] in await loadHome(for: key) }
                     }
-                    Spacer()
+                    if destination != .chat { Spacer() }
                 }
                 if let cleanupError = recording.cleanupError {
                     VStack(alignment: .leading, spacing: 8) {
@@ -227,7 +237,7 @@ struct ContentView: View {
             }
             .padding(.horizontal, 32)
             .padding(.bottom, selectedMeeting == nil ? 20 : 8)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .frame(minWidth: 470, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .contentShape(Rectangle())
         }
         .task { await loadMeetings() }
@@ -280,7 +290,8 @@ struct ContentView: View {
             MeetingEditorView(meeting: meeting, store: store, onSave: merge)
         }
         .sheet(isPresented: $isCommandPalettePresented) {
-            CommandPaletteView(meetings: meetings, store: store, commands: paletteCommands, activate: activatePaletteItem)
+            CommandPaletteView(meetings: meetings, store: store, commands: paletteCommands,
+                               activate: activatePaletteItem, startChat: startChatFromSearch)
         }
         .focusedSceneValue(\.openCommandPalette, { request(.showCommandPalette) })
     }
@@ -312,6 +323,11 @@ struct ContentView: View {
         case .tag(let tag): request(.navigate(.label(tag)))
         case .command(let command): command.run()
         }
+    }
+
+    private func startChatFromSearch(_ question: String) {
+        recording.chat.startChat(with: question)
+        request(.navigate(.chat))
     }
 
     private func meetingsWithLabel(_ tag: Tag) -> some View {
@@ -361,7 +377,13 @@ struct ContentView: View {
     private func meetingActions(_ meeting: Meeting) -> MeetingActions {
         MeetingActions(meeting: meeting, canEdit: !isSaving && !recording.isDeleting(meeting.id),
                        canDelete: !isSaving && recording.canDelete(meeting.id),
+                       openChat: { openChat(for: meeting.id) },
                        edit: { request(.edit(meeting.id)) }, delete: { request(.delete(meeting.id)) })
+    }
+
+    private func openChat(for meetingID: UUID) {
+        recording.chat.startNewChat(for: meetingID)
+        request(.navigate(.chat))
     }
 
     private func meetingMetadata(_ meeting: Meeting) -> some View {
@@ -483,9 +505,21 @@ struct ContentView: View {
     }
 
     private func openMeeting(_ id: UUID, revealLatest: Bool = false) {
+        citedPassageID = nil
         revealLatestRecording = revealLatest
         activeTab = .transcription
         destination = .meeting(id)
+    }
+
+    private func openChatCitation(_ citation: ChatCitation) async -> Bool {
+        guard (try? await store.isChatCitationCurrent(citation)) == true,
+              let passage = citation.passageIDs.first else { return false }
+        revealLatestRecording = false
+        activeTab = .transcription
+        destination = .meeting(citation.meetingID)
+        citedPassageID = passage
+        citationNavigationRevision &+= 1
+        return true
     }
 
     private func deleteMeeting(_ id: UUID) {
@@ -555,14 +589,15 @@ struct ContentView: View {
         }
     }
 
-    private func createMeetingFromCalendar(title: String, description: String?, calendarDate: Date, calendarName: String) {
+    private func createMeetingFromCalendar(details: CalendarEventDetails, calendarDate: Date, calendarName: String) {
         guard canCreate else { return }
         isSaving = true
         mutationError = nil
         Task {
             do {
-                let meeting = try await store.createMeeting(id: UUID(), name: title, description: description,
-                                                            calendarEventDate: calendarDate, calendarName: calendarName)
+                let meeting = try await store.createMeeting(id: UUID(), name: details.title, description: details.notes,
+                                                            calendarEventDate: calendarDate, calendarName: calendarName,
+                                                            calendarDetails: details)
                 merge(meeting)
                 openMeeting(meeting.id)
                 destination = .meeting(meeting.id)

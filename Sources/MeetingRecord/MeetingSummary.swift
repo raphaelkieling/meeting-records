@@ -13,6 +13,7 @@ struct MeetingSummary: Sendable {
 struct MeetingSummarySnapshot: Sendable {
     let summary: MeetingSummary?
     let transcript: String
+    let context: String
     let transcriptRevision: String
     let hasPendingAudio: Bool
 
@@ -22,6 +23,9 @@ struct MeetingSummarySnapshot: Sendable {
 
 enum SummaryModel: String, CaseIterable {
     case appleIntelligence = "apple-intelligence"
+    case gpt62Astra = "gpt-6.2-astra"
+    case gpt62Sol = "gpt-6.2-sol"
+    case gpt61Terra = "gpt-6.1-terra"
     case gpt6Luna = "gpt-6-luna"
     case gpt54Mini = "gpt-5.4-mini"
     case gpt54Nano = "gpt-5.4-nano"
@@ -32,6 +36,9 @@ enum SummaryModel: String, CaseIterable {
     var displayName: String {
         switch self {
         case .appleIntelligence: "Apple Intelligence"
+        case .gpt62Astra: "OpenAI · GPT-6.2 Astra"
+        case .gpt62Sol: "OpenAI · GPT-6.2 Sol"
+        case .gpt61Terra: "OpenAI · GPT-6.1 Terra"
         case .gpt6Luna: "OpenAI · GPT-6 Luna"
         case .gpt54Mini: "OpenAI · GPT-5.4 mini"
         case .gpt54Nano: "OpenAI · GPT-5.4 nano"
@@ -50,10 +57,10 @@ final class MeetingSummaryCoordinator: ObservableObject {
     @Published private(set) var revision = 0
     private var tasks: [UUID: Task<Void, Never>] = [:]
     private let store: MeetingStore
-    private let summarize: @Sendable (String, SummaryModel, String) async throws -> String
+    private let summarize: @Sendable (String, String, SummaryModel, String) async throws -> String
 
     init(store: MeetingStore,
-         summarize: @escaping @Sendable (String, SummaryModel, String) async throws -> String = MeetingSummarizer.generate) {
+         summarize: @escaping @Sendable (String, String, SummaryModel, String) async throws -> String = MeetingSummarizer.generate) {
         self.store = store
         self.summarize = summarize
     }
@@ -71,7 +78,7 @@ final class MeetingSummaryCoordinator: ObservableObject {
                 let source = try await store.summarySnapshot(for: meetingID)
                 guard source.canGenerate else { throw MeetingSummaryError.transcriptNotReady }
                 try Task.checkCancellation()
-                let text = try await summarize(source.transcript, model, prompt)
+                let text = try await summarize(source.transcript, source.context, model, prompt)
                 try Task.checkCancellation()
                 try await store.saveSummary(.init(text: text, model: model.rawValue,
                                                   transcriptRevision: source.transcriptRevision), for: meetingID)
@@ -142,20 +149,20 @@ enum MeetingSummarizer {
         }
     }
 
-    static func generate(_ transcript: String, model: SummaryModel, prompt: String) async throws -> String {
+    static func generate(_ transcript: String, context: String, model: SummaryModel, prompt: String) async throws -> String {
         let instructions = SummaryPrompt.instructions(for: prompt)
         if model.usesOpenAI {
             let key = try OpenAISummaryKey.load()
             let client = OpenAISummaryClient(model: model, key: key)
             return try await summarizeSections(transcript[...], requestByteLimit: 120_000, respond: { source, merging in
-                try await client.respond(instructions: instructions, input: input(for: source, merging: merging))
+                try await client.respond(instructions: instructions, input: input(for: source, context: context, merging: merging))
             }, isContextOverflow: { ($0 as? OpenAISummaryError) == .contextOverflow })
         }
         if let reason = availability().message { throw MeetingSummaryError.unavailable(reason) }
         #if canImport(FoundationModels)
         if #available(macOS 26, *) {
             return try await summarizeSections(transcript[...], respond: { source, merging in
-                try await respond(to: source, merging: merging, instructions: instructions)
+                try await respond(to: source, context: context, merging: merging, instructions: instructions)
             }, isContextOverflow: isContextOverflow)
         }
         #endif
@@ -186,20 +193,21 @@ enum MeetingSummarizer {
         return try await respond([first, second].joined(separator: "\n\n"), true)
     }
 
-    private static func input(for source: String, merging: Bool) throws -> String {
+    static func input(for source: String, context: String, merging: Bool) throws -> String {
         let operation = merging
             ? "Combine these chronological section notes using the requested format. Remove repetition and preserve the distinct decisions and commitments relevant to the summary."
             : "Summarize the meeting transcript."
-        let encoded = try JSONEncoder().encode(source)
-        return operation + "\n\nSource (JSON string):\n" + String(decoding: encoded, as: UTF8.self)
+        let key = merging ? "section notes" : "transcript"
+        let encoded = try JSONEncoder().encode([key: source, "meeting context": context])
+        return operation + "\n\nSource (JSON):\n" + String(decoding: encoded, as: UTF8.self)
     }
 
     #if canImport(FoundationModels)
     @available(macOS 26, *)
-    private static func respond(to source: String, merging: Bool, instructions: String) async throws -> String {
+    private static func respond(to source: String, context: String, merging: Bool, instructions: String) async throws -> String {
         try Task.checkCancellation()
         let session = LanguageModelSession(model: .default, instructions: instructions)
-        let input = try input(for: source, merging: merging)
+        let input = try input(for: source, context: context, merging: merging)
         let response = try await session.respond(to: input,
             options: GenerationOptions(temperature: 0.2, maximumResponseTokens: 800))
         let text = response.content.trimmingCharacters(in: .whitespacesAndNewlines)

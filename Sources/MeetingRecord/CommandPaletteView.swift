@@ -6,6 +6,7 @@ struct CommandPaletteView: View {
     let store: MeetingStore
     let commands: [PaletteCommand]
     let activate: (PaletteItem) -> Void
+    let startChat: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
@@ -14,7 +15,13 @@ struct CommandPaletteView: View {
     @State private var selectedID: PaletteItem.ID?
 
     var body: some View {
-        let items = PaletteItem.search(query, meetings: meetings, tags: tags, commands: commands)
+        let matches = PaletteItem.search(query, meetings: meetings, tags: tags, commands: commands)
+        let question = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let items: [PaletteItem] = matches.isEmpty && !question.isEmpty
+            ? [.command(PaletteCommand(title: "Ask across all meetings: \(question)", icon: "bubble.left.and.bubble.right", keywords: []) {
+                startChat(question)
+            })]
+            : matches
         let activeIndex = items.firstIndex { $0.id == selectedID } ?? items.startIndex
 
         VStack(spacing: 0) {
@@ -41,11 +48,8 @@ struct CommandPaletteView: View {
             Divider()
 
             if items.isEmpty {
-                Text("No matches")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 24)
+                Text("No matches").font(.callout).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity).padding(.vertical, 24)
             } else {
                 results(items, selected: items[activeIndex].id)
             }

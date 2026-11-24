@@ -34,6 +34,7 @@ struct SidebarView: View {
             }
             .buttonStyle(.plain)
             .help("Search meetings, tags, and commands")
+            navigationButton("Chat", icon: "bubble.left.and.bubble.right", target: .chat)
             navigationButton("Labels", icon: "tag", target: .labels)
             navigationButton("Calendar", icon: "calendar", target: .calendar)
             navigationButton("Settings", icon: "gearshape", target: .settings)
@@ -99,7 +100,6 @@ struct SidebarView: View {
         }
         .padding(12)
         .padding(.top, 0)
-        .frame(width: 240)
         .frame(maxHeight: .infinity)
         .background(.background.secondary)
         .onAppear { focusedDestination = .home }
@@ -107,7 +107,7 @@ struct SidebarView: View {
             guard editor == nil else { return }
             let meetings: [Meeting]
             if case .loaded(let values) = state { meetings = values } else { meetings = [] }
-            let targets: [Destination] = [.home, .labels, .calendar, .settings] + meetings.map { .meeting($0.id) }
+            let targets: [Destination] = [.home, .chat, .labels, .calendar, .settings] + meetings.map { .meeting($0.id) }
             let index = targets.firstIndex(of: focusedDestination ?? .home) ?? 0
             switch direction {
             case .down: focusedDestination = targets[min(index + 1, targets.count - 1)]
@@ -127,6 +127,13 @@ struct SidebarView: View {
             InlineMeetingName(meeting: meeting, origin: .sidebar, editor: $editor,
                               isSaving: isSaving, begin: { rename(meeting.id) }, save: save, cancel: cancel)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            if isRecording { RecordingIndicator() }
+            if !meeting.tags.isEmpty {
+                Image(systemName: "tag")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+            }
             if meeting.calendarEventDate != nil {
                 Image(systemName: "calendar")
                     .font(.system(size: 14))
@@ -134,13 +141,6 @@ struct SidebarView: View {
                     .help("Created from a calendar event")
                     .accessibilityHidden(true)
             }
-            if !meeting.tags.isEmpty {
-                Image(systemName: "tag")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-            }
-            if isRecording { RecordingIndicator() }
         }
         .padding(.horizontal, 8).padding(.vertical, 6)
         .background(rowBackground(for: target),
@@ -176,9 +176,9 @@ struct SidebarView: View {
 
     private func accessibilityValue(for meeting: Meeting, isRecording: Bool) -> String {
         var values: [String] = []
+        if isRecording { values.append("Recording") }
         if !meeting.tags.isEmpty { values.append("Labels: \(meeting.tags.map(\.name).joined(separator: ", "))") }
         if meeting.calendarEventDate != nil { values.append("Calendar event attached") }
-        if isRecording { values.append("Recording") }
         return values.joined(separator: ", ")
     }
 
@@ -195,6 +195,7 @@ struct SidebarView: View {
         .buttonStyle(.plain)
         .focusable()
         .focused($focusedDestination, equals: target)
+        .onKeyPress(.return) { navigate(target); return .handled }
         .help(title)
         .accessibilityAddTraits(isSelected(target) ? .isSelected : [])
     }

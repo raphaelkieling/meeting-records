@@ -6,9 +6,11 @@ extension Color {
 
 @main
 struct MeetingRecordApp: App {
-    @StateObject private var recording = RecordingCoordinator()
+    @NSApplicationDelegateAdaptor(RecordingMenuBar.self) private var menuBar
     @AppStorage("didDismissSetup") private var didDismissSetup = false
     @State private var showingSetup = false
+
+    private var recording: RecordingCoordinator { menuBar.recording }
 
     var body: some Scene {
         Window("Meeting Record", id: "main") {

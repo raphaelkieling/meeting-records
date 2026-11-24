@@ -32,11 +32,25 @@ final class MeetingStoreTests: XCTestCase {
         return sqlite3_column_int(statement, 0)
     }
 
-    func testFreshDatabaseIsEmptyV8() async throws {
+    private func dropChatSchema(at url: URL) throws {
+        try execute("""
+            DROP TABLE chat_sources;
+            DROP TABLE chat_messages;
+            DROP TABLE chat_conversations;
+            DROP TABLE chat_chunks;
+            DROP TABLE chat_indexed;
+            DROP TRIGGER chat_revision_insert;
+            DROP TRIGGER chat_revision_update;
+            DROP TRIGGER chat_revision_delete;
+            ALTER TABLE transcript_jobs DROP COLUMN chatRevision;
+            """, at: url)
+    }
+
+    func testFreshDatabaseIsEmptyV10() async throws {
         let url = try temporaryURL()
         let meetings = try await MeetingStore(databaseURL: url).loadMeetings()
         XCTAssertTrue(meetings.isEmpty)
-        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 8)
+        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 10)
     }
 
     func testThirtyRecordsReopenUnicodeDuplicateNamesAndStableOrder() async throws {
@@ -66,6 +80,7 @@ final class MeetingStoreTests: XCTestCase {
             meetings.append(try await store.createMeeting(id: UUID(), name: "Meeting \(index)"))
         }
         _ = try await store.renameMeeting(id: meetings[0].id, name: "Renamed first")
+        try dropChatSchema(at: url)
         try execute("""
             DROP TABLE meeting_tags;
             DROP TABLE tags;
@@ -83,7 +98,7 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertEqual(summary.completedTranscriptions, 0)
         let all = try await reopened.loadMeetings()
         XCTAssertEqual(all.first?.name, "Renamed first")
-        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 8)
+        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 10)
     }
 
     func testTranscriptionWorkBatchesAdjacentCheckpointsPerSource() async throws {
@@ -170,17 +185,50 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertEqual(persisted, [edited])
     }
 
+    func testCalendarSummaryUsesAvailableFieldsAfterVersionEightMigration() async throws {
+        let url = try temporaryURL()
+        let store = MeetingStore(databaseURL: url)
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let meeting = try await store.createMeeting(id: UUID(), name: "Quarterly review", description: "Review the roadmap",
+                                                    calendarEventDate: start, calendarName: "Work")
+        try dropChatSchema(at: url)
+        try execute("""
+            ALTER TABLE calendar_meeting_inputs DROP COLUMN details;
+            PRAGMA user_version=8;
+            """, at: url)
+
+        let snapshot = try await MeetingStore(databaseURL: url).summarySnapshot(for: meeting.id)
+        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 10)
+        XCTAssertEqual(snapshot.context, """
+            Meeting title: Quarterly review
+            Calendar: Work
+            Scheduled start: \(start.ISO8601Format())
+            Meeting description: Review the roadmap
+            """)
+        XCTAssertFalse(snapshot.canGenerate)
+    }
+
     @MainActor
     func testSummaryWaitsForCompleteTranscriptAndTracksItsRevision() async throws {
         actor Calls {
             var prompts: [String] = []
+            var contexts: [String] = []
             var count: Int { prompts.count }
-            func next(prompt: String) -> Int { prompts.append(prompt); return count }
+            func next(prompt: String, context: String) -> Int {
+                prompts.append(prompt)
+                contexts.append(context)
+                return count
+            }
         }
         enum Failure: Error { case modelUnavailable }
         let url = try temporaryURL()
         let store = MeetingStore(databaseURL: url)
-        let meeting = try await store.createMeeting(id: UUID(), name: "Summary owner")
+        let scheduledStart = Date(timeIntervalSince1970: 1_700_000_000)
+        let invite = CalendarEventDetails(title: "Release planning", notes: "Original agenda", endDate: scheduledStart + 3600,
+                                          organizer: "Ana", attendees: ["Beatriz", "José"])
+        let meeting = try await store.createMeeting(id: UUID(), name: "Release review", description: "Updated agenda",
+                                                    calendarEventDate: scheduledStart, calendarName: "Work",
+                                                    calendarDetails: invite)
         let other = try await store.createMeeting(id: UUID(), name: "Other meeting")
         let empty = try await store.summarySnapshot(for: meeting.id)
         XCTAssertFalse(empty.canGenerate)
@@ -205,8 +253,8 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertTrue(ready.canGenerate)
         XCTAssertTrue(ready.transcript.contains("Me: We agreed to ship on Friday."))
         let calls = Calls()
-        let coordinator = MeetingSummaryCoordinator(store: store) { _, _, prompt in
-            guard await calls.next(prompt: prompt) == 1 else { throw Failure.modelUnavailable }
+        let coordinator = MeetingSummaryCoordinator(store: store) { _, context, _, prompt in
+            guard await calls.next(prompt: prompt, context: context) == 1 else { throw Failure.modelUnavailable }
             return "Ship on Friday."
         }
         let beforeClick = await calls.count
@@ -222,12 +270,22 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertEqual(afterClick, 1)
         let receivedPrompts = await calls.prompts
         XCTAssertEqual(receivedPrompts, [customPrompt])
+        let contexts = await calls.contexts
+        let context = try XCTUnwrap(contexts.first)
+        for field in ["Meeting title: Release review", "Calendar title: Release planning", "Calendar: Work",
+                      "Scheduled start: \(scheduledStart.ISO8601Format())",
+                      "Scheduled end: \((scheduledStart + 3600).ISO8601Format())",
+                      "Organizer: Ana", "Invitees: Beatriz, José", "Meeting description: Updated agenda",
+                      "Calendar description: Original agenda"] {
+            XCTAssertTrue(context.contains(field), "Missing \(field)")
+        }
         let reopened = MeetingStore(databaseURL: url)
         let saved = try await reopened.summarySnapshot(for: meeting.id)
         XCTAssertEqual(saved.summary?.text, "Ship on Friday.")
         XCTAssertFalse(saved.isOutdated)
         let unrelated = try await reopened.summarySnapshot(for: other.id)
         XCTAssertNil(unrelated.summary)
+        XCTAssertEqual(unrelated.context, "Meeting title: Other meeting")
         coordinator.generate(for: meeting.id)
         for _ in 0..<100 where coordinator.generating.contains(meeting.id) {
             try await Task.sleep(for: .milliseconds(10))
@@ -235,6 +293,12 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertNotNil(coordinator.errors[meeting.id])
         let afterFailure = try await reopened.summarySnapshot(for: meeting.id)
         XCTAssertEqual(afterFailure.summary?.text, "Ship on Friday.")
+
+        _ = try await reopened.renameMeeting(id: meeting.id, name: "New title")
+        let renamed = try await reopened.summarySnapshot(for: meeting.id)
+        XCTAssertTrue(renamed.isOutdated)
+        XCTAssertTrue(renamed.context.contains("Calendar title: Release planning"))
+        _ = try await reopened.renameMeeting(id: meeting.id, name: meeting.name)
 
         try execute("UPDATE transcript_segments SET text = 'Ship on Monday.'", at: url)
         let changed = try await reopened.summarySnapshot(for: meeting.id)
@@ -257,11 +321,11 @@ final class MeetingStoreTests: XCTestCase {
 
     func testFutureVersionIsPreservedByteForByte() async throws {
         let url = try temporaryURL()
-        try execute("CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES ('preserve'); PRAGMA user_version=8", at: url)
+        try execute("CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES ('preserve'); PRAGMA user_version=11", at: url)
         let original = try Data(contentsOf: url)
         do { _ = try await MeetingStore(databaseURL: url).loadMeetings(); XCTFail("Expected incompatible version") } catch {}
         XCTAssertEqual(try Data(contentsOf: url), original)
-        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 8)
+        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 11)
     }
 
     func testInitializationFailureRollsBackWithoutChangingExistingSchema() async throws {

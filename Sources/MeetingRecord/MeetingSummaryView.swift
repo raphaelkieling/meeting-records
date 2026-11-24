@@ -5,6 +5,7 @@ struct MeetingSummaryView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let meetingID: UUID
     let store: MeetingStore
+    let meetingUpdatedAt: Date
     let recordingRevision: Int
     let transcriptionRevision: Int
     let isRecording: Bool
@@ -22,6 +23,13 @@ struct MeetingSummaryView: View {
     private struct AvailabilityCheck: Equatable {
         let scenePhase: ScenePhase
         let model: SummaryModel
+    }
+
+    private struct SnapshotKey: Equatable {
+        let meetingUpdatedAt: Date
+        let recordings: Int
+        let transcripts: Int
+        let summaries: Int
     }
 
     private var isGenerating: Bool { summaries.generating.contains(meetingID) }
@@ -62,7 +70,8 @@ struct MeetingSummaryView: View {
                 summaries.generate(for: meetingID, model: request.model, prompt: prompt)
             }
         }
-        .task(id: [recordingRevision, transcriptionRevision, summaries.revision]) {
+        .task(id: SnapshotKey(meetingUpdatedAt: meetingUpdatedAt, recordings: recordingRevision,
+                              transcripts: transcriptionRevision, summaries: summaries.revision)) {
             do {
                 let current = try await store.summarySnapshot(for: meetingID)
                 guard !Task.isCancelled else { return }
@@ -88,7 +97,7 @@ struct MeetingSummaryView: View {
     private var summaryActions: some View {
         HStack(spacing: 10) {
             Text(snapshot?.isOutdated == true
-                 ? "New transcript text is available."
+                 ? "Meeting details or transcript text have changed."
                  : "No changes since the last summary.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -217,7 +226,7 @@ private struct SummaryGenerationSheet: View {
                 }
             }
             Text(model.usesOpenAI
-                 ? "Using \(model.displayName) sends this meeting’s transcript text and prompt to OpenAI."
+                 ? "Using \(model.displayName) sends the transcript, prompt, and meeting details to OpenAI, including calendar descriptions and invitee names when available."
                  : "Apple Intelligence will summarize this meeting on your Mac.")
                 .font(.callout).foregroundStyle(.secondary)
             HStack {

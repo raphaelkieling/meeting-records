@@ -1,5 +1,13 @@
 import Foundation
 
+struct CalendarEventDetails: Codable, Sendable {
+    let title: String
+    let notes: String?
+    let endDate: Date?
+    let organizer: String?
+    let attendees: [String]
+}
+
 struct Meeting: Identifiable, Equatable, Sendable {
     let id: UUID
     let name: String

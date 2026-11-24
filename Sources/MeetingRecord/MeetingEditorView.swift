@@ -5,10 +5,13 @@ struct MeetingActions: View {
     let meeting: Meeting
     let canEdit: Bool
     let canDelete: Bool
+    let openChat: () -> Void
     let edit: () -> Void
     let delete: () -> Void
 
     var body: some View {
+        Button("Chat About This Meeting", systemImage: "bubble.left.and.bubble.right", action: openChat)
+        Divider()
         Button("Edit Meeting…", systemImage: "pencil", action: edit)
             .disabled(!canEdit)
         Button("Copy Link as Markdown", systemImage: "link", action: copyLink)

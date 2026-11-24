@@ -11,8 +11,8 @@ struct CalendarView: View {
     @State private var error: String?
     @State private var hasMoreAbove = false
     @State private var hasMoreBelow = false
-    let createMeeting: (String, String?, Date, String) -> Void
-    init(initialDate: Date? = nil, createMeeting: @escaping (String, String?, Date, String) -> Void) {
+    let createMeeting: (CalendarEventDetails, Date, String) -> Void
+    init(initialDate: Date? = nil, createMeeting: @escaping (CalendarEventDetails, Date, String) -> Void) {
         self.createMeeting = createMeeting
         _start = State(initialValue: Calendar.current.startOfDay(for: initialDate ?? .now))
     }
@@ -127,8 +127,11 @@ struct CalendarView: View {
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.quaternary, lineWidth: 1))
         .contentShape(RoundedRectangle(cornerRadius: 10))
         .onTapGesture(count: 2) {
-            createMeeting(event.title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? event.title! : "Untitled Event",
-                          event.notes, event.startDate ?? .now, event.calendar.title)
+            let title = Meeting.normalizedDescription(event.title) ?? "Untitled Event"
+            let details = CalendarEventDetails(title: title, notes: Meeting.normalizedDescription(event.notes),
+                                               endDate: event.endDate, organizer: Meeting.normalizedDescription(event.organizer?.name),
+                                               attendees: (event.attendees ?? []).compactMap { Meeting.normalizedDescription($0.name) })
+            createMeeting(details, event.startDate ?? .now, event.calendar.title)
         }
         .help("Double-click to create a meeting")
         .accessibilityHint("Double-click to create a meeting with this title and description")

@@ -67,10 +67,17 @@ A primeira versão permite ler e copiar o texto. Edição manual, reprodução s
 - Meetings can have an optional plain-text description. Users can edit it from a meeting's context menu; the saved description appears beneath the meeting title and can be searched.
 - Text search covers meeting titles, descriptions, available transcript text, and label names. Results update while typing and show a relevant transcript excerpt when the match comes from transcript text, plus a non-empty meeting description beneath its title.
 - Text and label filters combine with AND. Selecting multiple labels returns meetings containing every selected label. With no text, selected labels filter the list on their own.
-- The Labels page below Search lets users create, rename, recolor, and delete shared labels. Deleting a label removes it from every meeting that uses it.
+- The Labels page lets users create, rename, recolor, and delete shared labels. Deleting a label removes it from every meeting that uses it.
 - A meeting's context menu includes Labels. Its modal shows current assignments and lets users select or remove shared labels before saving.
 - A meeting with labels displays an outlined tag icon on the right side of its sidebar row.
 - Search is local and works offline. It must remain responsive during recording and normal navigation.
+
+## Meeting Chat expansion
+
+- Chat opens from the sidebar below Search. Its header provides History and New Chat. User messages appear in right-aligned red bubbles. Assistant replies appear as streaming Markdown.
+- Chat uses the selected model configured in Chat settings, independently from Summarization. Apple Intelligence runs on device; selected GPT models use the OpenAI API and a separate API key.
+- Chat retrieves transcript passages locally, cites the evidence, and links citations to the original transcript. Saved conversations and the search index stay on the Mac.
+- Acceptance requires validating citations against Portuguese, Spanish, and English transcripts and verifying that history and retrieval respect meeting deletion.
 
 ## Armazenamento e exclusão
 
