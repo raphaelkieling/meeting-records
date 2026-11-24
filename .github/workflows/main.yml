@@ -10,8 +10,15 @@ permissions:
 jobs:
   test-build-release:
     runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
       - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun swift --version
 
       - name: Run tests
         run: xcrun swift test --disable-sandbox --cache-path .build/cache --manifest-cache local
