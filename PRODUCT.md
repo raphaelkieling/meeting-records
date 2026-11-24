@@ -61,6 +61,17 @@ Durante a gravação, a Transcription é atualizada incrementalmente; fica concl
 
 A primeira versão permite ler e copiar o texto. Edição manual, reprodução sincronizada e navegação do texto para o áudio ficam fora do escopo.
 
+## Meeting search and labels
+
+- A Search entry below Home opens a dedicated view with a plain text field and a label filter to its right.
+- Meetings can have an optional plain-text description. Users can edit it from a meeting's context menu; the saved description appears beneath the meeting title and can be searched.
+- Text search covers meeting titles, descriptions, available transcript text, and label names. Results update while typing and show a relevant transcript excerpt when the match comes from transcript text, plus a non-empty meeting description beneath its title.
+- Text and label filters combine with AND. Selecting multiple labels returns meetings containing every selected label. With no text, selected labels filter the list on their own.
+- The Labels page below Search lets users create, rename, recolor, and delete shared labels. Deleting a label removes it from every meeting that uses it.
+- A meeting's context menu includes Labels. Its modal shows current assignments and lets users select or remove shared labels before saving.
+- A meeting with labels displays an outlined tag icon on the right side of its sidebar row.
+- Search is local and works offline. It must remain responsive during recording and normal navigation.
+
 ## Armazenamento e exclusão
 
 O conteúdo é mantido localmente até exclusão manual; transcrever não apaga o áudio. Excluir uma Meeting exige confirmação e remove todos os seus Inputs, áudios e transcrições. Também é possível excluir um Input e atualizar a transcrição unificada para refletir os materiais restantes.

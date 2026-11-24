@@ -4,8 +4,10 @@ import Foundation
 @MainActor
 final class TranscriptionCoordinator: ObservableObject {
     @Published private(set) var revision = 0
+    @Published private(set) var completionRevision = 0
     @Published private(set) var installed: Set<String> = []
     @Published private(set) var selected: TranscriptionModel = .large
+    @Published private(set) var microphoneThreshold = 0.001
     @Published private(set) var downloading: TranscriptionModel?
     @Published private(set) var downloadedBytes: Int64 = 0
     @Published private(set) var error: String?
@@ -29,6 +31,10 @@ final class TranscriptionCoordinator: ObservableObject {
         if let id = UserDefaults.standard.string(forKey: selectionKey),
            let model = TranscriptionModel.catalog.first(where: { $0.id == id }) {
             selected = model
+        }
+        if let saved = UserDefaults.standard.object(forKey: "microphoneTranscriptionThreshold") as? Double,
+           saved.isFinite {
+            microphoneThreshold = min(1, max(0, saved))
         }
     }
 
@@ -62,6 +68,11 @@ final class TranscriptionCoordinator: ObservableObject {
         selected = model
         UserDefaults.standard.set(model.id, forKey: selectionKey)
         Task { await retry(unstartedOnly: true) }
+    }
+
+    func setMicrophoneThreshold(_ value: Double) {
+        microphoneThreshold = min(1, max(0, value))
+        UserDefaults.standard.set(microphoneThreshold, forKey: "microphoneTranscriptionThreshold")
     }
 
     func download(_ model: TranscriptionModel) async {
@@ -107,20 +118,29 @@ final class TranscriptionCoordinator: ObservableObject {
         guard let root = recordingsRoot else { return }
         do {
             while !Task.isCancelled {
-                if try await store.finishDrainedTranscripts() { revision += 1 }
+                if try await store.finishDrainedTranscripts() {
+                    revision += 1
+                    completionRevision += 1
+                }
                 guard isReady, let work = try await store.nextTranscriptionWork() else { return }
                 let id = work.audio.recordingID
                 let pinned = work.modelID.flatMap { id in TranscriptionModel.catalog.first { $0.id == id } }
                 let model = pinned ?? selected
-                if try await store.claimTranscript(id, model: model) { revision += 1 }
+                switch try await store.claimTranscript(id, model: model) {
+                case .removed: continue
+                case .changed: revision += 1
+                case .unchanged: break
+                }
                 do {
                     guard installed.contains(model.id),
                           work.modelID == nil || (pinned != nil && work.modelVersion == model.version)
                     else { throw TranscriptionError.modelUnavailable }
-                    let result = try await engine.transcribe(work.audio,
-                        at: root.appendingPathComponent(work.audio.relativePath),
-                        using: TranscriptionEngine.folder(for: model, root: modelsRoot(root)))
-                    try await store.saveTranscript(work.audio, result: result)
+                    let result = try await engine.transcribe(work.audioSegments,
+                        urls: work.audioSegments.map { root.appendingPathComponent($0.relativePath) },
+                        using: TranscriptionEngine.folder(for: model, root: modelsRoot(root)),
+                        nemotronAsset: model.isNemotron ? model.files.first?.path : nil,
+                        microphoneThreshold: microphoneThreshold)
+                    try await store.saveTranscript(work.audioSegments, result: result)
                 } catch {
                     try await store.deferTranscript(id, error: error.localizedDescription)
                 }

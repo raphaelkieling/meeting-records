@@ -48,6 +48,25 @@ actor RecordingStorage {
         self.checkpointPublished = checkpointPublished
     }
 
+    static func finishMeetingDeletions(store: MeetingStore) async throws {
+        guard try await !store.pendingMeetingDeletions().isEmpty else { return }
+        let root = try await store.recordingRoot()
+        let lock = try RecordingFileLock(root: root.appendingPathComponent(".deletions", isDirectory: true))
+        defer { withExtendedLifetime(lock) {} }
+        var firstError: (any Error)?
+        for id in try await store.pendingMeetingDeletions() {
+            do {
+                let directory = root.appendingPathComponent(id.uuidString, isDirectory: true)
+                do { try FileManager.default.removeItem(at: directory) }
+                catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile {}
+                try await store.finishMeetingDeletion(id)
+            } catch {
+                if firstError == nil { firstError = error }
+            }
+        }
+        if let firstError { throw firstError }
+    }
+
     static func recover(store: MeetingStore, root: URL) async throws {
         for recording in try await store.unfinishedRecordings() {
             let storage = RecordingStorage(store: store, root: root, recording: recording)
@@ -56,7 +75,12 @@ actor RecordingStorage {
         }
     }
 
-    func append(_ sample: CapturedAudio) async throws -> Double {
+    struct InputLevels: Sendable {
+        let peak: Double
+        let rms: Double
+    }
+
+    func append(_ sample: CapturedAudio) async throws -> InputLevels {
         guard let description = sample.buffer.formatDescription,
               let count = Int32(exactly: sample.buffer.numSamples), count > 0
         else { throw RecordingError.invalidAudio }
@@ -87,10 +111,10 @@ actor RecordingStorage {
             throw error
         }
         checkpoints[sample.source]?.frames += Int64(count)
-        if let current = checkpoints[sample.source], Double(current.frames) / format.sampleRate >= 5 {
+        if let current = checkpoints[sample.source], Double(current.frames) / format.sampleRate >= 10 {
             try await publish(sample.source)
         }
-        return level(of: pcm)
+        return levels(of: pcm)
     }
 
     func finish() async throws {
@@ -162,22 +186,30 @@ actor RecordingStorage {
         checkpointPublished()
     }
 
-    private func level(of pcm: AVAudioPCMBuffer) -> Double {
+    private func levels(of pcm: AVAudioPCMBuffer) -> InputLevels {
         let channels = Int(pcm.format.channelCount)
         let stride = pcm.stride
         var peak = 0.0
+        var squareSum = 0.0
+        var sampleCount = 0
         for channel in 0..<channels {
-            for frame in Swift.stride(from: 0, to: Int(pcm.frameLength), by: 8) {
+            for frame in 0..<Int(pcm.frameLength) {
                 let index = frame * stride
+                let value: Double
                 if let samples = pcm.floatChannelData {
-                    peak = max(peak, abs(Double(samples[channel][index])))
+                    value = Double(samples[channel][index])
                 } else if let samples = pcm.int16ChannelData {
-                    peak = max(peak, abs(Double(samples[channel][index])) / 32_768)
+                    value = Double(samples[channel][index]) / 32_768
                 } else if let samples = pcm.int32ChannelData {
-                    peak = max(peak, abs(Double(samples[channel][index])) / 2_147_483_648)
+                    value = Double(samples[channel][index]) / 2_147_483_648
+                } else {
+                    continue
                 }
+                peak = max(peak, abs(value))
+                squareSum += value * value
+                sampleCount += 1
             }
         }
-        return min(1, peak)
+        return InputLevels(peak: min(1, peak), rms: sampleCount > 0 ? min(1, sqrt(squareSum / Double(sampleCount))) : 0)
     }
 }

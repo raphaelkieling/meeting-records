@@ -3,6 +3,7 @@
 <plist version="1.0"><dict>
 <key>CFBundleIdentifier</key><string>com.meetingrecord.app</string>
 <key>CFBundleName</key><string>Meeting Record</string>
+<key>CFBundleIconFile</key><string>AppIcon.icns</string>
 <key>CFBundleExecutable</key><string>MeetingRecord</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleVersion</key><string>1</string>

@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct TranscriptionView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let meetingID: UUID
     let store: MeetingStore
     let recordingRevision: Int
@@ -9,13 +10,16 @@ struct TranscriptionView: View {
     @State private var passages: [UUID: [TranscriptPassage]] = [:]
     @State private var statuses: [UUID: TranscriptStatus] = [:]
     @State private var error: String?
+    @State private var hasLoaded = false
+    @State private var hasMoreTranscriptionBelow = false
 
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
                 if let error {
                     Text(error).foregroundStyle(.red)
-                } else if !passages.isEmpty {
+                }
+                if !passages.isEmpty {
                     ForEach(Array(inputs.enumerated()), id: \.element.id) { index, input in
                         let rows = passages[input.id] ?? []
                         let status = statuses[input.id]?.status ?? .pending
@@ -44,18 +48,30 @@ struct TranscriptionView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 12)
-            .background(alignment: .topLeading) {
-                MeetingScrollbar().frame(width: 0, height: 0).accessibilityHidden(true)
-            }
+            .onGeometryChange(for: Bool.self) { geometry in
+                guard let viewport = geometry.bounds(of: .scrollView) else { return false }
+                return geometry.frame(in: .scrollView).maxY > viewport.height + 1
+            } action: { hasMoreTranscriptionBelow = $0 }
         }
         .contentMargins(.all, EdgeInsets(top: 0, leading: 0, bottom: 92, trailing: 12), for: .scrollContent)
-        .contentMargins(.vertical, 6, for: .scrollIndicators)
+        .bottomScrollFade(hasMoreBelow: hasMoreTranscriptionBelow)
+        .opacity(hasLoaded || error != nil ? 1 : 0)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: hasLoaded || error != nil)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay {
-            if error == nil, passages.isEmpty {
-                MeetingEmptyState("No transcription yet.", icon: "text.bubble", detail: context)
+            if error == nil {
+                if !hasLoaded {
+                    ProgressView("Loading transcription…")
+                        .transition(.opacity)
+                } else if passages.isEmpty {
+                    MeetingEmptyState("No transcription yet.", icon: "text.bubble",
+                                      detail: context ?? "Transcripts appear here after your recordings are processed.")
+                        .offset(y: -20)
+                        .transition(.opacity)
+                }
             }
         }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: hasLoaded)
         .task(id: [recordingRevision, transcription.revision]) {
             do {
                 let inputs = try await store.recordings(for: meetingID, includeActive: true)
@@ -66,6 +82,7 @@ struct TranscriptionView: View {
                 passages = Dictionary(grouping: rows, by: \.inputID)
                 self.statuses = statuses
                 error = nil
+                hasLoaded = true
             } catch {
                 guard !Task.isCancelled else { return }
                 self.error = "Could not load transcription. \(error.localizedDescription)"
@@ -89,61 +106,17 @@ struct TranscriptionView: View {
     }
 }
 
-struct TranscriptionSettingsView: View {
-    @ObservedObject var transcription: TranscriptionCoordinator
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("Transcription Models").font(.headline)
-                if !transcription.isReady {
-                    Text("Download a model to enable recording and local transcription.")
-                        .foregroundStyle(.secondary)
-                }
-                ForEach(TranscriptionModel.catalog) { model in
-                    modelRow(model)
-                }
-                if let error = transcription.error {
-                    Text(error).foregroundStyle(.red).textSelection(.enabled)
-                }
-                Divider()
-                RecordingPermissionsView()
-            }
-            .frame(maxWidth: 520, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private func modelRow(_ model: TranscriptionModel) -> some View {
-        let installed = transcription.installed.contains(model.id)
-        let selected = transcription.selected == model
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(model.name).font(.headline)
-                    Text(ByteCountFormatter.string(fromByteCount: model.downloadSize, countStyle: .file))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                if installed && selected {
-                    Label("Active", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                } else if installed {
-                    Button("Use Model") { transcription.select(model) }
-                } else {
-                    Button("Download") { Task { await transcription.download(model) } }
-                        .disabled(transcription.downloading != nil)
+extension View {
+    func bottomScrollFade(hasMoreBelow: Bool) -> some View {
+        scrollIndicators(.never, axes: .vertical)
+            .mask {
+                VStack(spacing: 0) {
+                    Rectangle()
+                    if hasMoreBelow {
+                        LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+                            .frame(height: 26)
+                    }
                 }
             }
-            if transcription.downloading == model {
-                ProgressView(value: Double(transcription.downloadedBytes), total: Double(model.downloadSize)) {
-                    Text("Downloading \(model.name)")
-                } currentValueLabel: {
-                    Text(ByteCountFormatter.string(fromByteCount: transcription.downloadedBytes, countStyle: .file))
-                }
-            }
-        }
-        .padding(12)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
     }
 }

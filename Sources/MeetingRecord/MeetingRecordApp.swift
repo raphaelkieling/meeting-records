@@ -14,6 +14,7 @@ struct MeetingRecordApp: App {
                 .frame(minWidth: 720, minHeight: 480)
                 .accentColor(.meetingAccent)
                 .tint(.meetingAccent)
+                .focusEffectDisabled()
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1000, height: 700)

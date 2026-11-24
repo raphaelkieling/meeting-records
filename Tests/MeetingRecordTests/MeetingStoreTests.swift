@@ -32,11 +32,11 @@ final class MeetingStoreTests: XCTestCase {
         return sqlite3_column_int(statement, 0)
     }
 
-    func testFreshDatabaseIsEmptyV4() async throws {
+    func testFreshDatabaseIsEmptyV7() async throws {
         let url = try temporaryURL()
         let meetings = try await MeetingStore(databaseURL: url).loadMeetings()
         XCTAssertTrue(meetings.isEmpty)
-        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 4)
+        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 7)
     }
 
     func testThirtyRecordsReopenUnicodeDuplicateNamesAndStableOrder() async throws {
@@ -47,7 +47,7 @@ final class MeetingStoreTests: XCTestCase {
             let id = UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", i))!
             let name = i < 3 ? "Reunião 日本語 español" : "Reunião \(i) " + String(repeating: "nome longo ", count: 20)
             expected.append(try Meeting(id: id, name: name, createdAt: Date(timeIntervalSince1970: Double(i / 2)), updatedAt: Date(timeIntervalSince1970: Double(i / 2))))
-            try execute("INSERT INTO meetings VALUES ('\(id.uuidString)', '\(name)', \(i / 2), \(i / 2))", at: url)
+            try execute("INSERT INTO meetings(id, name, createdAt, updatedAt) VALUES ('\(id.uuidString)', '\(name)', \(i / 2), \(i / 2))", at: url)
         }
         expected.sort {
             $0.createdAt == $1.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.createdAt > $1.createdAt
@@ -56,6 +56,158 @@ final class MeetingStoreTests: XCTestCase {
         let second = try await MeetingStore(databaseURL: url).loadMeetings()
         XCTAssertEqual(first, expected)
         XCTAssertEqual(second, expected)
+    }
+
+    func testHomeUsesCreationOrderAndPreservesV4Library() async throws {
+        let url = try temporaryURL()
+        let store = MeetingStore(databaseURL: url)
+        var meetings: [Meeting] = []
+        for index in 1...4 {
+            meetings.append(try await store.createMeeting(id: UUID(), name: "Meeting \(index)"))
+        }
+        _ = try await store.renameMeeting(id: meetings[0].id, name: "Renamed first")
+        try execute("""
+            DROP TABLE meeting_tags;
+            DROP TABLE tags;
+            ALTER TABLE meetings DROP COLUMN description;
+            DROP TABLE meeting_summaries;
+            DROP TABLE pending_meeting_deletions;
+            PRAGMA user_version=4;
+            """, at: url)
+
+        let reopened = MeetingStore(databaseURL: url)
+        let summary = try await reopened.loadHomeSummary()
+        XCTAssertEqual(summary.meetings.map(\.id), meetings.suffix(3).reversed().map(\.id))
+        XCTAssertEqual(summary.savedRecordingIDs, [])
+        XCTAssertEqual(summary.completedTranscriptions, 0)
+        let all = try await reopened.loadMeetings()
+        XCTAssertEqual(all.first?.name, "Renamed first")
+        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 7)
+    }
+
+    func testTranscriptionWorkBatchesAdjacentCheckpointsPerSource() async throws {
+        let store = MeetingStore(databaseURL: try temporaryURL())
+        let meeting = try await store.createMeeting(id: UUID(), name: "Batch")
+        let recording = Recording(id: UUID(), meetingID: meeting.id, startedAt: Date(), endedAt: nil, state: .starting)
+        try await store.beginRecording(recording)
+        try await store.markRecordingStarted(recording.id)
+        for (offset, source) in [(Int64(0), AudioSegment.Source.me), (Int64(5_000_000_000), .me),
+                                 (Int64(0), .other), (Int64(5_000_000_000), .other)] {
+            try await store.registerSegment(AudioSegment(recordingID: recording.id, source: source,
+                startOffset: offset, frameCount: 240_000, relativePath: "\(source.rawValue)/\(offset).caf"))
+        }
+        let next = try await store.nextTranscriptionWork()
+        let work = try XCTUnwrap(next)
+        XCTAssertEqual(work.audioSegments.count, 2)
+        XCTAssertEqual(work.audioSegments.map(\.source), [.me, .me])
+        _ = try await store.claimTranscript(recording.id, model: .base)
+        try await store.saveTranscript(work.audioSegments, result: TranscribedCheckpoint(processedThrough: 10_000_000_000,
+            segments: [.init(startOffset: 1_000_000_000, endOffset: 2_000_000_000, text: "first"),
+                       .init(startOffset: 6_000_000_000, endOffset: 7_000_000_000, text: "second")]))
+        let passages = try await store.transcriptPassages(for: meeting.id)
+        XCTAssertEqual(passages.map(\.text), ["first", "second"])
+        let matches = try await store.searchMeetings(.init(text: "SECOND", selectedTagIDs: []))
+        XCTAssertEqual(matches.map(\.id), [meeting.id])
+        XCTAssertEqual(matches.first?.transcriptExcerpt, "second")
+        let other = try await store.nextTranscriptionWork()
+        let otherWork = try XCTUnwrap(other)
+        XCTAssertEqual(otherWork.audioSegments.map(\.source), [.other, .other])
+    }
+
+    func testSearchCombinesSharedTagsAndMeetingText() async throws {
+        let url = try temporaryURL()
+        let store = MeetingStore(databaseURL: url)
+        let first = try await store.createMeeting(id: UUID(), name: "Planning")
+        let second = try await store.createMeeting(id: UUID(), name: "Follow up")
+        let legacyID = second.id.uuidString.lowercased()
+        try execute("UPDATE meetings SET id = '\(legacyID)' WHERE id = '\(second.id.uuidString)'", at: url)
+        let work = try Tag(id: UUID(), name: "work", color: .blue)
+        let oneOnOne = try Tag(id: UUID(), name: "1-1", color: .gold)
+        try await store.saveMeetingTags(meetingID: first.id, selectedTagIDs: [work.id, oneOnOne.id],
+                                        newTags: [work, oneOnOne])
+        try await store.saveMeetingTags(meetingID: second.id, selectedTagIDs: [work.id], newTags: [])
+        _ = try await store.updateMeetingDescription(id: first.id, description: "  Budget at 50%  ")
+
+        let reopened = MeetingStore(databaseURL: url)
+        let tagMatches = try await reopened.searchMeetings(.init(text: "WORK", selectedTagIDs: []))
+        XCTAssertEqual(Set(tagMatches.map(\.id)), [first.id, second.id])
+        let tagOnly = try await reopened.searchMeetings(.init(text: "", selectedTagIDs: [work.id, oneOnOne.id]))
+        XCTAssertEqual(tagOnly.map(\.id), [first.id])
+        let combined = try await reopened.searchMeetings(.init(text: "50%", selectedTagIDs: [work.id, oneOnOne.id]))
+        XCTAssertEqual(combined.map(\.id), [first.id])
+        XCTAssertEqual(combined.first?.meeting.description, "Budget at 50%")
+        XCTAssertEqual(Set(combined.first?.assignedTags.map(\.id) ?? []), [work.id, oneOnOne.id])
+        let rejected = try await reopened.searchMeetings(.init(text: "Follow", selectedTagIDs: [work.id, oneOnOne.id]))
+        XCTAssertTrue(rejected.isEmpty)
+    }
+
+    @MainActor
+    func testSummaryWaitsForCompleteTranscriptAndTracksItsRevision() async throws {
+        actor Calls {
+            var count = 0
+            func next() -> Int { count += 1; return count }
+        }
+        enum Failure: Error { case modelUnavailable }
+        let url = try temporaryURL()
+        let store = MeetingStore(databaseURL: url)
+        let meeting = try await store.createMeeting(id: UUID(), name: "Summary owner")
+        let other = try await store.createMeeting(id: UUID(), name: "Other meeting")
+        let empty = try await store.summarySnapshot(for: meeting.id)
+        XCTAssertFalse(empty.canGenerate)
+
+        let recording = Recording(id: UUID(), meetingID: meeting.id, startedAt: Date(), endedAt: nil, state: .starting)
+        try await store.beginRecording(recording)
+        try await store.markRecordingStarted(recording.id)
+        let audio = AudioSegment(recordingID: recording.id, source: .me, startOffset: 0,
+                                 frameCount: 48_000, relativePath: "summary.caf")
+        try await store.registerSegment(audio)
+        _ = try await store.claimTranscript(recording.id, model: .base)
+        try await store.saveTranscript(audio, result: .init(processedThrough: 1_000_000_000,
+            segments: [.init(startOffset: 0, endOffset: 1_000_000_000, text: "We agreed to ship on Friday.")]))
+        let recordingSnapshot = try await store.summarySnapshot(for: meeting.id)
+        XCTAssertFalse(recordingSnapshot.canGenerate)
+        _ = try await store.finalizeRecording(recording.id, endedAt: Date(), interrupted: false)
+        let queued = try await store.summarySnapshot(for: meeting.id)
+        XCTAssertFalse(queued.canGenerate)
+        _ = try await store.finishDrainedTranscripts()
+
+        let ready = try await store.summarySnapshot(for: meeting.id)
+        XCTAssertTrue(ready.canGenerate)
+        XCTAssertTrue(ready.transcript.contains("Me: We agreed to ship on Friday."))
+        let calls = Calls()
+        let coordinator = MeetingSummaryCoordinator(store: store) { _, _ in
+            guard await calls.next() == 1 else { throw Failure.modelUnavailable }
+            return "Ship on Friday."
+        }
+        let beforeClick = await calls.count
+        XCTAssertEqual(beforeClick, 0)
+        coordinator.generate(for: meeting.id)
+        coordinator.generate(for: meeting.id)
+        for _ in 0..<100 where coordinator.generating.contains(meeting.id) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(coordinator.generating.contains(meeting.id))
+        let afterClick = await calls.count
+        XCTAssertEqual(afterClick, 1)
+        let reopened = MeetingStore(databaseURL: url)
+        let saved = try await reopened.summarySnapshot(for: meeting.id)
+        XCTAssertEqual(saved.summary?.text, "Ship on Friday.")
+        XCTAssertFalse(saved.isOutdated)
+        let unrelated = try await reopened.summarySnapshot(for: other.id)
+        XCTAssertNil(unrelated.summary)
+        coordinator.generate(for: meeting.id)
+        for _ in 0..<100 where coordinator.generating.contains(meeting.id) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNotNil(coordinator.errors[meeting.id])
+        let afterFailure = try await reopened.summarySnapshot(for: meeting.id)
+        XCTAssertEqual(afterFailure.summary?.text, "Ship on Friday.")
+
+        try execute("UPDATE transcript_segments SET text = 'Ship on Monday.'", at: url)
+        let changed = try await reopened.summarySnapshot(for: meeting.id)
+        XCTAssertTrue(changed.isOutdated)
+        try await reopened.deleteMeeting(meeting.id)
+        XCTAssertEqual(try scalar("SELECT count(*) FROM meeting_summaries", at: url), 0)
     }
 
     func testOpenFailureCanRetrySameStoreAfterDirectoryRepair() async throws {
@@ -72,11 +224,11 @@ final class MeetingStoreTests: XCTestCase {
 
     func testFutureVersionIsPreservedByteForByte() async throws {
         let url = try temporaryURL()
-        try execute("CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES ('preserve'); PRAGMA user_version=5", at: url)
+        try execute("CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES ('preserve'); PRAGMA user_version=8", at: url)
         let original = try Data(contentsOf: url)
         do { _ = try await MeetingStore(databaseURL: url).loadMeetings(); XCTFail("Expected incompatible version") } catch {}
         XCTAssertEqual(try Data(contentsOf: url), original)
-        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 5)
+        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 8)
     }
 
     func testInitializationFailureRollsBackWithoutChangingExistingSchema() async throws {

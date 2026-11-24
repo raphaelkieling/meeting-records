@@ -1,32 +1,34 @@
 import SwiftUI
 
-struct MeetingEmptyState: View {
+struct MeetingEmptyState<Icon: View>: View {
     let title: LocalizedStringKey
-    let icon: String
-    var detail: String?
+    let icon: Icon
+    let detail: String?
 
-    init(_ title: LocalizedStringKey, icon: String, detail: String? = nil) {
+    init(_ title: LocalizedStringKey, detail: String? = nil, @ViewBuilder icon: () -> Icon) {
         self.title = title
-        self.icon = icon
+        self.icon = icon()
         self.detail = detail
     }
 
     var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.system(size: 54, weight: .light))
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            Text(title)
-                .font(.headline)
+        ContentUnavailableView {
+            Label {
+                Text(title)
+            } icon: {
+                icon
+            }
+        } description: {
             if let detail {
                 Text(detail)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
             }
         }
-        .multilineTextAlignment(.center)
-        .padding(16)
-        .offset(y: -24)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+extension MeetingEmptyState where Icon == Image {
+    init(_ title: LocalizedStringKey, icon: String, detail: String? = nil) {
+        self.init(title, detail: detail) { Image(systemName: icon) }
     }
 }

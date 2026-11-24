@@ -24,18 +24,74 @@ final class RecordingCoordinator: ObservableObject {
 
     let store: MeetingStore
     let transcription: TranscriptionCoordinator
+    let summaries: MeetingSummaryCoordinator
 
     init() {
         let store = MeetingStore()
         self.store = store
         self.transcription = TranscriptionCoordinator(store: store)
+        self.summaries = MeetingSummaryCoordinator(store: store)
     }
     @Published private(set) var state = State.idle
     @Published private(set) var revision = 0
     @Published var error: String?
+    @Published var cleanupError: String?
+    @Published private var deletingMeetings: Set<UUID> = []
+    private var isCleaningUp = false
+    private var cleanupRequested = false
     let levels = CurrentValueSubject<Double, Never>(0)
+    let microphoneRMS = CurrentValueSubject<Double, Never>(0)
     private var session: Session?
     private var checkedRecovery = false
+    @Published private(set) var microphoneID = UserDefaults.standard.string(forKey: "selectedMicrophoneID") ?? ""
+    private var microphoneMeter: RecordingCapture?
+
+    func selectMicrophone(_ id: String) {
+        microphoneID = id
+        UserDefaults.standard.set(id, forKey: "selectedMicrophoneID")
+        stopMicrophoneMeter()
+        if state == .idle { microphoneRMS.send(0) }
+        if microphoneMeterRequested { Task { await startMicrophoneMeterIfNeeded() } }
+    }
+
+    private var microphoneMeterStop: Task<Void, Never>?
+    private var microphoneMeterRequested = false
+
+    func setMicrophoneMetering(_ enabled: Bool) {
+        microphoneMeterRequested = enabled
+        if enabled {
+            Task { await startMicrophoneMeterIfNeeded() }
+            return
+        }
+        stopMicrophoneMeter()
+        if state == .idle { microphoneRMS.send(0) }
+    }
+
+    private func stopMicrophoneMeter() {
+        guard let meter = microphoneMeter else { return }
+        microphoneMeter = nil
+        microphoneMeterStop = Task { try? await meter.stop() }
+    }
+
+    private func startMicrophoneMeterIfNeeded() async {
+        await microphoneMeterStop?.value
+        guard microphoneMeterRequested, state == .idle, microphoneMeter == nil else { return }
+        let meter = RecordingCapture()
+        microphoneMeter = meter
+        do {
+            try await meter.startMicrophone(id: microphoneID) { [weak self, weak meter] level in
+                Task { @MainActor in
+                    guard let self, let meter, self.microphoneMeter === meter,
+                          self.microphoneMeterRequested, self.state == .idle else { return }
+                    self.microphoneRMS.send(level)
+                }
+            }
+        } catch {
+            guard microphoneMeter === meter else { return }
+            stopMicrophoneMeter()
+            self.error = "Could not monitor the microphone. \(error.localizedDescription)"
+        }
+    }
 
     func recover() async {
         guard !checkedRecovery, state == .idle else { return }
@@ -53,13 +109,54 @@ final class RecordingCoordinator: ObservableObject {
         await transcription.start()
     }
 
+    func isDeleting(_ id: UUID) -> Bool { deletingMeetings.contains(id) }
+
+    func canDelete(_ id: UUID) -> Bool {
+        state.meetingID != id && !isDeleting(id)
+    }
+
+    func deleteMeeting(_ id: UUID) async throws {
+        guard canDelete(id) else { throw MeetingStoreError.meetingRecording }
+        deletingMeetings.insert(id)
+        defer { deletingMeetings.remove(id) }
+        try await store.deleteMeeting(id)
+        summaries.cancel(for: id)
+    }
+
+    func deleteAllMeetings() async throws {
+        guard state == .idle, deletingMeetings.isEmpty else { throw RecordingError.alreadyRecording }
+        let deletedIDs = try await store.deleteAllMeetings()
+        for id in deletedIDs { summaries.cancel(for: id) }
+        revision += 1
+    }
+
+    func finishMeetingDeletions() async {
+        cleanupRequested = true
+        guard !isCleaningUp else { return }
+        isCleaningUp = true
+        defer { isCleaningUp = false }
+        while cleanupRequested {
+            cleanupRequested = false
+            do {
+                try await RecordingStorage.finishMeetingDeletions(store: store)
+                cleanupError = nil
+            } catch {
+                cleanupError = error.localizedDescription
+            }
+        }
+    }
+
     func toggle(for meetingID: UUID) {
         switch state {
         case .idle:
-            guard transcription.isReady else { return }
+            guard transcription.isReady, !deletingMeetings.contains(meetingID) else { return }
             state = .starting(meetingID)
             error = nil
-            Task { await start(meetingID: meetingID) }
+            Task {
+                stopMicrophoneMeter()
+                await microphoneMeterStop?.value
+                await start(meetingID: meetingID)
+            }
         case .recording(let owner) where owner == meetingID:
             state = .finishing(meetingID)
             Task { await finish() }
@@ -79,7 +176,7 @@ final class RecordingCoordinator: ObservableObject {
             try await store.beginRecording(recording)
             let capture = RecordingCapture()
             do {
-                try await capture.start()
+                try await capture.start(microphoneID: microphoneID)
                 try await store.markRecordingStarted(recording.id)
             } catch {
                 try? await capture.stop()
@@ -93,11 +190,15 @@ final class RecordingCoordinator: ObservableObject {
             let consumer = Task { [weak self] in
                 var lastUpdate = ContinuousClock.now
                 var peak = 0.0
+                var rms = 0.0
                 for try await sample in capture.samples {
-                    peak = max(peak, try await storage.append(sample))
+                    let input = try await storage.append(sample)
+                    peak = max(peak, input.peak)
+                    if sample.source == .me { rms = input.rms }
                     let now = ContinuousClock.now
                     if lastUpdate.duration(to: now) >= .milliseconds(75) {
                         self?.levels.send(peak)
+                        self?.microphoneRMS.send(rms)
                         lastUpdate = now
                         peak = 0
                     }
@@ -115,6 +216,7 @@ final class RecordingCoordinator: ObservableObject {
         } catch {
             self.error = "Could not start recording. \(error.localizedDescription)"
             state = .idle
+            await startMicrophoneMeterIfNeeded()
         }
     }
 
@@ -136,8 +238,10 @@ final class RecordingCoordinator: ObservableObject {
         if let failure { error = "Recording ended. \(failure.localizedDescription)" }
         self.session = nil
         levels.send(0)
+        microphoneRMS.send(0)
         revision += 1
         state = .idle
+        await startMicrophoneMeterIfNeeded()
         transcription.checkpointPublished()
     }
 }

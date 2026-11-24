@@ -1,7 +1,17 @@
 import SwiftUI
 
 enum Destination: Hashable {
-    case home, settings, meeting(UUID)
+    case home, search, labels, settings, meeting(UUID)
+
+    var title: LocalizedStringKey {
+        switch self {
+        case .home: "Home"
+        case .search: "Search"
+        case .labels: "Labels"
+        case .settings: "Settings"
+        case .meeting: "Meeting"
+        }
+    }
 }
 
 enum MeetingLoadState {
@@ -18,14 +28,36 @@ struct RenameSession {
 }
 
 private enum MeetingAction {
-    case navigate(Destination), create, rename(UUID, RenameOrigin)
+    case navigate(Destination), openRecent(UUID), openModelSettings, create, rename(UUID, RenameOrigin)
+    case editTags(UUID), editDescription(UUID), delete(UUID)
+}
+
+private enum MeetingEditorSheet: Identifiable {
+    case tags(Meeting), description(Meeting)
+
+    var id: String {
+        switch self {
+        case .tags(let meeting): "tags-\(meeting.id.uuidString)"
+        case .description(let meeting): "description-\(meeting.id.uuidString)"
+        }
+    }
 }
 
 struct ContentView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var homeRevision = 0
+    @State private var recentMeetings: [Meeting]?
+    @State private var homeError: String?
+    @State private var recordedTime: TimeInterval?
+    @State private var completedTranscriptions: Int?
+    @State private var durationError: String?
+    @State private var savedDurations: [UUID: TimeInterval] = [:]
     @State private var destination: Destination = .home
     @State private var state: MeetingLoadState = .loading
     @State private var editor: RenameSession?
     @State private var isSaving = false
+    @State private var pendingDeletion: Meeting?
+    @State private var deletionError: String?
     @State private var mutationError: String?
     @State private var pendingAction: MeetingAction?
     @State private var creation: (id: UUID, name: String)?
@@ -33,17 +65,33 @@ struct ContentView: View {
     @State private var revealVersion = 0
     @ObservedObject var recording: RecordingCoordinator
     @ObservedObject var transcription: TranscriptionCoordinator
-    @State private var activeTab = MeetingTab.inputs
+    @State private var revealLatestRecording = false
+    @State private var activeTab = MeetingTab.transcription
+    @State private var settingsSection: SettingsSection?
+    @State private var meetingEditor: MeetingEditorSheet?
     private var store: MeetingStore { recording.store }
+
+    private struct HomeLoadKey: Equatable {
+        let meetings: Int
+        let recordings: Int
+        let transcriptions: Int
+    }
+
+    private var homeLoadKey: HomeLoadKey {
+        HomeLoadKey(meetings: homeRevision, recordings: recording.revision,
+                    transcriptions: transcription.completionRevision)
+    }
 
     private enum MeetingTab: String, CaseIterable {
         case inputs = "Inputs"
         case transcription = "Transcription"
+        case summary = "Summary"
 
         var icon: String {
             switch self {
             case .inputs: "tray"
             case .transcription: "text.bubble"
+            case .summary: "sparkles"
             }
         }
     }
@@ -71,30 +119,50 @@ struct ContentView: View {
                 canCreate: canCreate, revealID: revealID, revealVersion: revealVersion,
                 recordingMeetingID: recordingMeetingID,
                 navigate: { request(.navigate($0)) }, create: { request(.create) },
-                rename: { request(.rename($0, .sidebar)) }, save: saveRename, cancel: cancelRename,
+                rename: { request(.rename($0, .sidebar)) },
+                editTags: { request(.editTags($0)) },
+                editDescription: { request(.editDescription($0)) },
+                canDelete: { !isSaving && recording.canDelete($0) },
+                delete: { request(.delete($0)) },
+                save: saveRename, cancel: cancelRename,
                 retry: { Task { await loadMeetings() } }
             )
             Divider().ignoresSafeArea(.container, edges: .top)
             VStack(alignment: .leading, spacing: 20) {
                 if let meeting = selectedMeeting {
-                    InlineMeetingName(meeting: meeting, origin: .header, editor: $editor,
-                                      isSaving: isSaving, begin: { request(.rename(meeting.id, .header)) },
-                                      save: saveRename, cancel: cancelRename)
-                        .font(.largeTitle.bold())
+                    VStack(alignment: .leading, spacing: 6) {
+                        InlineMeetingName(meeting: meeting, origin: .header, editor: $editor,
+                                          isSaving: isSaving, begin: { request(.rename(meeting.id, .header)) },
+                                          save: saveRename, cancel: cancelRename)
+                            .font(.largeTitle.bold())
+                        meetingMetadata(meeting)
+                    }
                     VStack(alignment: .leading, spacing: 0) {
                         meetingTabPicker
                             .frame(maxWidth: .infinity)
                             .padding(.bottom, 12)
-                        if activeTab == .inputs {
-                            InputsView(meetingID: meeting.id, store: store, revision: recording.revision,
-                                       transcription: transcription,
-                                       openSettings: { request(.navigate(.settings)) })
-                                .id(meeting.id)
-                        } else {
-                            TranscriptionView(meetingID: meeting.id, store: store,
-                                              recordingRevision: recording.revision, transcription: transcription)
-                                .id(meeting.id)
+                        Group {
+                            switch activeTab {
+                            case .inputs:
+                                InputsView(meetingID: meeting.id, store: store, revision: recording.revision,
+                                           transcription: transcription, revealLatest: revealLatestRecording,
+                                           openSettings: { request(.openModelSettings) })
+                                    .id(meeting.id)
+                            case .transcription:
+                                TranscriptionView(meetingID: meeting.id, store: store,
+                                                  recordingRevision: recording.revision, transcription: transcription)
+                                    .id(meeting.id)
+                            case .summary:
+                                MeetingSummaryView(meetingID: meeting.id, store: store,
+                                                   recordingRevision: recording.revision,
+                                                   transcriptionRevision: transcription.revision,
+                                                   isRecording: recording.state.meetingID == meeting.id,
+                                                   summaries: recording.summaries)
+                                    .id(meeting.id)
+                            }
                         }
+                        .id(activeTab)
+                        .transition(.opacity)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .contentShape(Rectangle())
@@ -102,19 +170,41 @@ struct ContentView: View {
                     .overlay(alignment: .bottom) {
                         RecordingControl(state: recording.state, meetingID: meeting.id, levels: recording.levels,
                                          modelReady: transcription.isReady,
-                                         openSettings: { request(.navigate(.settings)) }) {
+                                         openSettings: { request(.openModelSettings) }) {
                             recording.toggle(for: meeting.id)
                         }
                         .padding(.bottom, 12)
                     }
                 } else {
-                    Text(destination == .settings ? "Settings" : "Home").font(.largeTitle.bold())
+                    Text(destination.title)
+                        .font(.largeTitle.bold())
                     if destination == .settings {
-                        TranscriptionSettingsView(transcription: transcription)
+                        SettingsView(section: $settingsSection, transcription: transcription, recording: recording,
+                                     deleteAll: deleteAllMeetingData)
+                    } else if destination == .search {
+                        SearchView(store: store,
+                                   refreshKey: "\(homeRevision)-\(recording.revision)-\(transcription.revision)",
+                                   openMeeting: { request(.navigate(.meeting($0))) })
+                    } else if destination == .labels {
+                        LabelsView(store: store, onChange: reloadMeetingLabels)
                     } else {
-                        Text("Your meeting workspace.").foregroundStyle(.secondary)
+                        HomeView(meetings: recentMeetings, error: homeError,
+                                 recordedTime: recordedTime, completedTranscriptions: completedTranscriptions,
+                                 durationError: durationError,
+                                 open: { request(.openRecent($0)) },
+                                 retry: { homeRevision += 1 })
+                            .task(id: homeLoadKey) { [key = homeLoadKey] in await loadHome(for: key) }
                     }
                     Spacer()
+                }
+                if let cleanupError = recording.cleanupError {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Meeting files are pending deletion. \(cleanupError)")
+                            .foregroundStyle(.red)
+                        Button("Retry File Cleanup") {
+                            Task { await recording.finishMeetingDeletions() }
+                        }
+                    }
                 }
                 if let mutationError {
                     VStack(alignment: .leading, spacing: 8) {
@@ -131,16 +221,76 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .contentShape(Rectangle())
         }
-        .task {
-            await recording.recover()
-            await loadMeetings()
-        }
-        .onChange(of: selectedMeeting?.id) { _, _ in activeTab = .inputs }
+        .task { await loadMeetings() }
+        .task { await recording.recover() }
+        .task { await recording.finishMeetingDeletions() }
         .alert("Recording", isPresented: Binding(get: { recording.error != nil },
                                                  set: { if !$0 { recording.error = nil } })) {
             Button("OK") { recording.error = nil }
         } message: {
             Text(recording.error ?? "")
+        }
+        .alert("Delete Meeting?", isPresented: Binding(get: { pendingDeletion != nil },
+                                                      set: { if !$0 { pendingDeletion = nil } }),
+               presenting: pendingDeletion) { meeting in
+            Button("Cancel", role: .cancel) {}
+            Button("Delete", role: .destructive) { deleteMeeting(meeting.id) }
+        } message: { meeting in
+            Text("Permanently delete “\(meeting.name)” and all its recordings, transcripts, and other attached content?")
+        }
+        .alert("Could Not Delete Meeting", isPresented: Binding(get: { deletionError != nil },
+                                                               set: { if !$0 { deletionError = nil } })) {
+            Button("OK") { deletionError = nil }
+        } message: {
+            Text(deletionError ?? "")
+        }
+        .sheet(item: $meetingEditor) { sheet in
+            switch sheet {
+            case .tags(let meeting):
+                TagManagementView(meeting: meeting, store: store, onSave: reloadMeetingLabels)
+            case .description(let meeting):
+                MeetingDescriptionEditorView(meeting: meeting, store: store) { updated in merge(updated) }
+            }
+        }
+    }
+
+    private func meetingMetadata(_ meeting: Meeting) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            if let description = meeting.description {
+                Button { request(.editDescription(meeting.id)) } label: {
+                    Text(description)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.leading)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .buttonStyle(.plain)
+                .help("Edit Description")
+                .accessibilityHint("Opens the full description for editing")
+            } else {
+                Button("Add a description…") { request(.editDescription(meeting.id)) }
+                    .buttonStyle(.plain)
+                    .font(.callout)
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer(minLength: 0)
+            if !meeting.tags.isEmpty {
+                ViewThatFits(in: .horizontal) {
+                    meetingLabelPills(meeting.tags)
+                    ScrollView(.horizontal) {
+                        meetingLabelPills(meeting.tags)
+                    }
+                    .scrollIndicators(.never)
+                }
+                .frame(maxWidth: 240, alignment: .trailing)
+            }
+        }
+    }
+
+    private func meetingLabelPills(_ tags: [Tag]) -> some View {
+        HStack(spacing: 5) {
+            ForEach(tags) { TagPill(tag: $0).lineLimit(1) }
         }
     }
 
@@ -148,18 +298,22 @@ struct ContentView: View {
         HStack(spacing: 2) {
             ForEach(MeetingTab.allCases, id: \.self) { tab in
                 let selected = activeTab == tab
+                let highlighted = selected && tab == .transcription
                 Button {
-                    activeTab = tab
+                    if tab != .inputs { revealLatestRecording = false }
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.06)) {
+                        activeTab = tab
+                    }
                 } label: {
                     Label(tab.rawValue, systemImage: tab.icon)
                         .font(.callout.weight(.medium))
-                        .foregroundStyle(selected ? .primary : .secondary)
+                        .foregroundStyle(highlighted ? Color.white : selected ? Color.primary : Color.secondary)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
                         .background {
                             if selected {
                                 Capsule()
-                                    .fill(Color(nsColor: .controlBackgroundColor))
+                                    .fill(highlighted ? Color.meetingAccent : Color(nsColor: .controlBackgroundColor))
                                     .shadow(color: .black.opacity(0.12), radius: 2, y: 1)
                             }
                         }
@@ -190,12 +344,87 @@ struct ContentView: View {
 
     private func perform(_ action: MeetingAction) {
         switch action {
-        case .navigate(let target): destination = target
+        case .navigate(let target):
+            if case .meeting(let id) = target {
+                openMeeting(id)
+            } else {
+                revealLatestRecording = false
+                if target == .settings { settingsSection = nil }
+                destination = target
+            }
+        case .openRecent(let id):
+            if !meetings.contains(where: { $0.id == id }) {
+                Task {
+                    await loadMeetings()
+                    if destination == .home && meetings.contains(where: { $0.id == id }) {
+                        request(.openRecent(id))
+                    }
+                }
+                return
+            }
+            openMeeting(id, revealLatest: true)
+        case .openModelSettings:
+            revealLatestRecording = false
+            settingsSection = .models
+            destination = .settings
+        case .editTags(let id):
+            if let meeting = meetings.first(where: { $0.id == id }) { meetingEditor = .tags(meeting) }
+        case .editDescription(let id):
+            if let meeting = meetings.first(where: { $0.id == id }) { meetingEditor = .description(meeting) }
         case .create: createMeeting()
         case .rename(let id, let origin):
-            guard let meeting = meetings.first(where: { $0.id == id }) else { return }
-            destination = .meeting(id)
+            guard !recording.isDeleting(id),
+                  let meeting = meetings.first(where: { $0.id == id }) else { return }
+            if destination != .meeting(id) { openMeeting(id) }
             editor = RenameSession(id: id, origin: origin, draft: meeting.name)
+        case .delete(let id):
+            guard recording.canDelete(id) else { return }
+            pendingDeletion = meetings.first(where: { $0.id == id })
+        }
+    }
+
+    private func openMeeting(_ id: UUID, revealLatest: Bool = false) {
+        revealLatestRecording = revealLatest
+        activeTab = .transcription
+        destination = .meeting(id)
+    }
+
+    private func deleteMeeting(_ id: UUID) {
+        Task {
+            do {
+                try await recording.deleteMeeting(id)
+            } catch {
+                deletionError = error.localizedDescription
+                return
+            }
+            if editor?.id == id {
+                editor = nil
+                pendingAction = nil
+            }
+            if destination == .meeting(id) {
+                revealLatestRecording = false
+                destination = .home
+            }
+            if revealID == id { revealID = nil }
+            state = .loaded(meetings.filter { $0.id != id })
+            homeRevision += 1
+            await recording.finishMeetingDeletions()
+        }
+    }
+
+    private func deleteAllMeetingData() {
+        Task {
+            do {
+                try await recording.deleteAllMeetings()
+                editor = nil
+                pendingAction = nil
+                revealID = nil
+                state = .loaded([])
+                homeRevision += 1
+                await recording.finishMeetingDeletions()
+            } catch {
+                recording.error = "Could not delete all meeting data. \(error.localizedDescription)"
+            }
         }
     }
 
@@ -203,6 +432,7 @@ struct ContentView: View {
         state = .loaded((meetings.filter { $0.id != meeting.id } + [meeting]).sorted(by: Meeting.mostRecentFirst))
         revealID = meeting.id
         revealVersion += 1
+        homeRevision += 1
     }
 
     private func createMeeting() {
@@ -219,7 +449,7 @@ struct ContentView: View {
             do {
                 let meeting = try await store.createMeeting(id: creation.id, name: creation.name)
                 merge(meeting)
-                destination = .meeting(meeting.id)
+                openMeeting(meeting.id)
                 self.creation = nil
             } catch { mutationError = error.localizedDescription }
             isSaving = false
@@ -254,10 +484,63 @@ struct ContentView: View {
         pendingAction = nil
     }
 
+    private func loadHome(for key: HomeLoadKey) async {
+        let summary: MeetingStore.HomeSummary
+        do {
+            summary = try await store.loadHomeSummary()
+        } catch {
+            guard !Task.isCancelled, key == homeLoadKey else { return }
+            homeError = error.localizedDescription
+            return
+        }
+        guard !Task.isCancelled, key == homeLoadKey else { return }
+        recentMeetings = summary.meetings
+        completedTranscriptions = summary.completedTranscriptions
+        homeError = nil
+        let savedIDs = Set(summary.savedRecordingIDs)
+        savedDurations = savedDurations.filter { savedIDs.contains($0.key) }
+
+        do {
+            let root = try await store.recordingRoot()
+            var total: TimeInterval = 0
+            for id in summary.savedRecordingIDs {
+                if let duration = savedDurations[id] {
+                    total += duration
+                } else {
+                    let segments = try await store.audioSegments(for: id)
+                    let duration = try await RecordingPlayback.savedDuration(segments: segments, root: root)
+                    guard !Task.isCancelled, key == homeLoadKey else { return }
+                    savedDurations[id] = duration
+                    total += duration
+                }
+            }
+            guard !Task.isCancelled, key == homeLoadKey else { return }
+            recordedTime = total
+            durationError = nil
+        } catch {
+            guard !Task.isCancelled, key == homeLoadKey else { return }
+            recordedTime = nil
+            durationError = error.localizedDescription
+        }
+    }
+
+    private func reloadMeetingLabels() {
+        homeRevision += 1
+        Task { await loadMeetings() }
+    }
+
     private func loadMeetings() async {
-        state = .loading
-        do { state = .loaded(try await store.loadMeetings()) }
-        catch { state = .failed(error.localizedDescription) }
+        let revision = homeRevision
+        if case .failed = state { state = .loading }
+        do {
+            let values = try await store.loadMeetings()
+            guard !Task.isCancelled, revision == homeRevision else { return }
+            state = .loaded(values)
+        } catch {
+            guard !Task.isCancelled, revision == homeRevision else { return }
+            if case .loaded = state { return }
+            state = .failed(error.localizedDescription)
+        }
     }
 }
 

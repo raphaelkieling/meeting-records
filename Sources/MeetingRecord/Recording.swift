@@ -22,7 +22,7 @@ struct AudioSegment: Sendable {
 }
 
 enum RecordingError: LocalizedError {
-    case microphonePermission, screenPermission, noMicrophone, noDisplay
+    case microphonePermission, screenPermission, noMicrophone, selectedMicrophoneUnavailable, noDisplay
     case invalidAudio, captureOverrun, emptyRecording, alreadyRecording
 
     var errorDescription: String? {
@@ -30,6 +30,7 @@ enum RecordingError: LocalizedError {
         case .microphonePermission: "Allow microphone access in System Settings → Privacy & Security → Microphone, then try again."
         case .screenPermission: "Allow screen recording in System Settings → Privacy & Security to capture Mac audio. Reopen Meeting Record after granting access."
         case .noMicrophone: "Connect a microphone and try again."
+        case .selectedMicrophoneUnavailable: "Reconnect the selected microphone or choose another in Settings."
         case .noDisplay: "Mac audio capture needs an available display."
         case .invalidAudio: "An audio source delivered an unreadable buffer or timestamp."
         case .captureOverrun: "The app could not save audio as fast as it was captured."

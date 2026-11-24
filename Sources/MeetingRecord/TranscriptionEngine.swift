@@ -1,4 +1,5 @@
 import AVFoundation
+import CTranscribe
 import Foundation
 import WhisperKit
 
@@ -6,11 +7,13 @@ enum TranscriptionError: LocalizedError {
     case modelUnavailable
     case invalidDownload(String, Int?)
     case engineBusy
+    case nemotronFailed(UInt32)
 
     var errorDescription: String? {
         switch self {
         case .modelUnavailable: "The transcription model for this recording is unavailable."
         case .engineBusy: "The transcription engine is already processing audio."
+        case .nemotronFailed(let code): "Nemotron could not transcribe this audio (code \(code))."
         case .invalidDownload(let name, let status):
             if let status, status != 200 { "Could not download \(name) (HTTP \(status))." }
             else { "The download for \(name) was incomplete." }
@@ -27,22 +30,54 @@ actor TranscriptionEngine {
     }
 
     private var loaded: LoadedModel?
+    private var nemotron: NemotronSession?
     private var isProcessing = false
 
-    func transcribe(_ audio: AudioSegment, at url: URL, using modelFolder: URL) async throws -> TranscribedCheckpoint {
+    func transcribe(_ audio: AudioSegment, at url: URL, using modelFolder: URL,
+                    microphoneThreshold: Double = 0.001) async throws -> TranscribedCheckpoint {
+        try await transcribe([audio], urls: [url], using: modelFolder, microphoneThreshold: microphoneThreshold)
+    }
+
+    func transcribe(_ audioSegments: [AudioSegment], urls: [URL], using modelFolder: URL,
+                    nemotronAsset: String? = nil,
+                    microphoneThreshold: Double = 0.001) async throws -> TranscribedCheckpoint {
         guard !isProcessing else { throw TranscriptionError.engineBusy }
+        guard let audio = audioSegments.first, audioSegments.count == urls.count else {
+            throw RecordingError.invalidAudio
+        }
         isProcessing = true
         defer { isProcessing = false }
 
-        let file = try AVAudioFile(forReading: url)
-        let duration = Double(file.length) / file.processingFormat.sampleRate
+        var samples: [Float] = []
+        let sampleRate = 16_000
+        for (segment, url) in zip(audioSegments, urls) {
+            let file = try AVAudioFile(forReading: url)
+            let duration = Double(file.length) / file.processingFormat.sampleRate
+            let endOffset = segment.startOffset + Int64((duration * 1e9).rounded())
+            let targetEnd = Int((Double(endOffset - audio.startOffset) / 1e9 * Double(sampleRate)).rounded())
+            let targetStart = Int((Double(segment.startOffset - audio.startOffset) / 1e9 * Double(sampleRate)).rounded())
+            guard targetStart >= 0, targetEnd >= targetStart else { throw RecordingError.invalidAudio }
+            if samples.count < targetStart { samples.append(contentsOf: repeatElement(0, count: targetStart - samples.count)) }
+            let decoded = try AudioProcessor.loadAudioAsFloatArray(fromPath: url.path)
+            if samples.count < targetEnd { samples.append(contentsOf: repeatElement(0, count: targetEnd - samples.count)) }
+            let count = min(decoded.count, targetEnd - targetStart)
+            if count > 0 { samples.replaceSubrange(targetStart..<(targetStart + count), with: decoded.prefix(count)) }
+        }
+        let duration = Double(samples.count) / Double(sampleRate)
         let checkpointEnd = audio.startOffset + Int64((duration * 1e9).rounded())
-        let samples = try AudioProcessor.loadAudioAsFloatArray(fromPath: url.path)
-        // Use a low peak threshold so quiet speech can still reach the model.
-        guard samples.contains(where: { abs($0) >= 0.001 }) else {
+        guard let selected = Self.selectedSamples(samples, source: audio.source, threshold: microphoneThreshold) else {
             return TranscribedCheckpoint(processedThrough: checkpointEnd, segments: [])
         }
+        samples = selected
 
+        if let nemotronAsset {
+            loaded = nil
+            let weights = modelFolder.appendingPathComponent(nemotronAsset)
+            if nemotron?.weights != weights { nemotron = try NemotronSession(weights: weights) }
+            guard let nemotron else { throw TranscriptionError.modelUnavailable }
+            return try nemotron.transcribe(samples, start: audio.startOffset, end: checkpointEnd)
+        }
+        nemotron = nil
         if loaded?.folder != modelFolder {
             loaded = nil
             guard FileManager.default.fileExists(atPath: modelFolder.appendingPathComponent("tokenizer.json").path),
@@ -66,6 +101,34 @@ actor TranscriptionEngine {
                          endOffset: audio.startOffset + Int64(end * 1e9), text: text)
         }
         return TranscribedCheckpoint(processedThrough: checkpointEnd, segments: segments)
+    }
+
+    static func selectedSamples(_ samples: [Float], source: AudioSegment.Source,
+                                threshold: Double) -> [Float]? {
+        guard source == .me else { return samples.contains(where: { abs($0) >= 0.001 }) ? samples : nil }
+        return selectMicrophoneIntervals(samples, threshold: threshold)
+    }
+
+    static func selectMicrophoneIntervals(_ samples: [Float], threshold: Double,
+                                          sampleRate: Int = 16_000, context: Double = 0.2) -> [Float]? {
+        guard !samples.isEmpty, sampleRate > 0 else { return nil }
+        let boundedThreshold = min(1, max(0.001, threshold))
+        let window = max(1, sampleRate / 10)
+        var eligible = [Bool](repeating: false, count: samples.count)
+        let margin = Int(context * Double(sampleRate))
+        for start in stride(from: 0, to: samples.count, by: window) {
+            let end = min(samples.count, start + window)
+            let rms = sqrt(samples[start..<end].reduce(0.0) { $0 + Double($1) * Double($1) } / Double(end - start))
+            if rms >= boundedThreshold {
+                let from = max(0, start - margin)
+                let through = min(samples.count, end + margin)
+                eligible.replaceSubrange(from..<through, with: repeatElement(true, count: through - from))
+            }
+        }
+        guard eligible.contains(true) else { return nil }
+        var selected = samples
+        for index in eligible.indices where !eligible[index] { selected[index] = 0 }
+        return selected
     }
 
     static func folder(for model: TranscriptionModel, root: URL) -> URL {
@@ -133,5 +196,49 @@ actor TranscriptionEngine {
                 }
             }
         }
+    }
+}
+
+private final class NemotronSession {
+    let weights: URL
+    private let session: OpaquePointer
+
+    init(weights: URL) throws {
+        var handle: OpaquePointer?
+        let status = transcribe_open(weights.path, nil, nil, &handle)
+        guard status == TRANSCRIBE_OK, let handle else {
+            throw TranscriptionError.nemotronFailed(status.rawValue)
+        }
+        self.weights = weights
+        session = handle
+    }
+
+    deinit { transcribe_session_free(session) }
+
+    func transcribe(_ samples: [Float], start: Int64, end: Int64) throws -> TranscribedCheckpoint {
+        guard let count = Int32(exactly: samples.count) else { throw RecordingError.invalidAudio }
+        var parameters = transcribe_run_params()
+        transcribe_run_params_init(&parameters)
+        parameters.timestamps = TRANSCRIBE_TIMESTAMPS_WORD
+        let status = transcribe_run(session, samples, count, &parameters)
+        guard status == TRANSCRIBE_OK else { throw TranscriptionError.nemotronFailed(status.rawValue) }
+        let text = transcribe_full_text(session).map { String(cString: $0) }?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let words = transcribe_n_words(session)
+        guard TranscriptPassage.hasWords(text) else { return .init(processedThrough: end, segments: []) }
+
+        var first = transcribe_word()
+        var last = transcribe_word()
+        transcribe_word_init(&first)
+        transcribe_word_init(&last)
+        let hasTiming = words > 0 && transcribe_get_word(session, 0, &first) == TRANSCRIBE_OK
+            && transcribe_get_word(session, words - 1, &last) == TRANSCRIBE_OK
+        let duration = end - start
+        let from = hasTiming ? min(duration / 1_000_000, max(0, first.t0_ms)) * 1_000_000 : 0
+        let through = hasTiming ? min(duration / 1_000_000, max(0, last.t1_ms)) * 1_000_000 : duration
+        let segment = through > from
+            ? TranscribedCheckpoint.Segment(startOffset: start + from, endOffset: start + through, text: text)
+            : TranscribedCheckpoint.Segment(startOffset: start, endOffset: end, text: text)
+        return .init(processedThrough: end, segments: [segment])
     }
 }

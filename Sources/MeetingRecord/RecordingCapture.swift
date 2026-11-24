@@ -18,6 +18,20 @@ final class RecordingCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDele
     let samples: AsyncThrowingStream<CapturedAudio, any Error>
     // Start and stop are serialized by RecordingCoordinator.
     private var stream: SCStream?
+    struct Microphone: Identifiable, Sendable {
+        let id: String
+        let name: String
+    }
+
+    static func microphones() -> [Microphone] {
+        AVCaptureDevice.DiscoverySession(deviceTypes: [.microphone, .external], mediaType: .audio,
+                                         position: .unspecified).devices.map {
+            Microphone(id: $0.uniqueID, name: $0.localizedName)
+        }
+    }
+
+    private var stopped = false
+    private var levelChanged: (@Sendable (Double) -> Void)?
     private var microphoneObservers: [any NSObjectProtocol] = []
 
     override init() {
@@ -32,7 +46,7 @@ final class RecordingCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDele
         }
     }
 
-    func start() async throws {
+    func start(microphoneID: String) async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         guard let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() })
                 ?? content.displays.first else { throw RecordingError.noDisplay }
@@ -44,14 +58,22 @@ final class RecordingCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDele
         self.stream = stream
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
         try await stream.startCapture()
-        try await startMicrophone()
+        try await startMicrophone(id: microphoneID)
     }
 
-    private func startMicrophone() async throws {
+    func startMicrophone(id: String, levelChanged: (@Sendable (Double) -> Void)? = nil) async throws {
         try await withCheckedThrowingContinuation { (resume: CheckedContinuation<Void, any Error>) in
             queue.async { [self] in
                 do {
-                    guard let device = AVCaptureDevice.default(for: .audio) else { throw RecordingError.noMicrophone }
+                    guard !stopped else { throw CancellationError() }
+                    guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
+                        throw RecordingError.microphonePermission
+                    }
+                    let selected = id.isEmpty ? AVCaptureDevice.default(for: .audio) : AVCaptureDevice(uniqueID: id)
+                    guard let device = selected, device.isConnected, device.hasMediaType(.audio) else {
+                        throw id.isEmpty ? RecordingError.noMicrophone : RecordingError.selectedMicrophoneUnavailable
+                    }
+                    self.levelChanged = levelChanged
                     let input = try AVCaptureDeviceInput(device: device)
                     let output = AVCaptureAudioDataOutput()
                     guard self.microphone.canAddInput(input), self.microphone.canAddOutput(output) else {
@@ -89,6 +111,8 @@ final class RecordingCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDele
         }
         await withCheckedContinuation { resume in
             queue.async {
+                self.stopped = true
+                self.levelChanged = nil
                 for observer in self.microphoneObservers {
                     NotificationCenter.default.removeObserver(observer)
                 }
@@ -117,6 +141,16 @@ final class RecordingCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDele
     }
 
     func captureOutput(_ output: AVCaptureOutput, didOutput buffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        if let levelChanged {
+            let channels = connection.audioChannels
+            guard !channels.isEmpty else { return }
+            let power = channels.reduce(0.0) { total, channel in
+                total + pow(10.0, Double(channel.averagePowerLevel) / 10.0)
+            }
+            let level = sqrt(power / Double(channels.count))
+            levelChanged(level.isFinite ? min(1, level) : 0)
+            return
+        }
         emit(buffer, source: .me, clock: microphone.synchronizationClock)
     }
 

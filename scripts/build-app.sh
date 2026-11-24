@@ -25,7 +25,23 @@ trap 'rm -rf "$staging"' EXIT
 mkdir -p "$staging/Contents/MacOS"
 cp Resources/Info.plist "$staging/Contents/Info.plist"
 cp "$bin_path/MeetingRecord" "$staging/Contents/MacOS/MeetingRecord"
+mkdir -p "$staging/Contents/Frameworks"
+cp -R "$bin_path/CTranscribe.framework" "$staging/Contents/Frameworks/"
+install_name_tool -add_rpath @executable_path/../Frameworks "$staging/Contents/MacOS/MeetingRecord"
+codesign --force --sign - "$staging/Contents/Frameworks/CTranscribe.framework"
 mkdir -p "$staging/Contents/Resources"
+iconset="$staging/AppIcon.iconset"
+mkdir "$iconset"
+for size in 16 32 128 256 512; do
+  sips -z "$size" "$size" Resources/AppIcon.png --out "$iconset/icon_${size}x${size}.png" >/dev/null
+  retina_size=$((size * 2))
+  sips -z "$retina_size" "$retina_size" Resources/AppIcon.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$iconset" -o "$staging/Contents/Resources/AppIcon.icns"
+rm -r "$iconset"
+mkdir -p "$staging/Contents/Resources/CTranscribe-Licenses"
+cp .build/artifacts/*/CTranscribe/TranscribeCpp.xcframework/LICENSE* \
+  "$staging/Contents/Resources/CTranscribe-Licenses/"
 for resources in "$bin_path"/*.bundle; do
   [[ -d "$resources" ]] || continue
   cp -R "$resources" "$staging/Contents/Resources/"

@@ -12,6 +12,10 @@ struct SidebarView: View {
     let navigate: (Destination) -> Void
     let create: () -> Void
     let rename: (UUID) -> Void
+    let editTags: (UUID) -> Void
+    let editDescription: (UUID) -> Void
+    let canDelete: (UUID) -> Bool
+    let delete: (UUID) -> Void
     let save: () -> Void
     let cancel: () -> Void
     let retry: () -> Void
@@ -21,6 +25,8 @@ struct SidebarView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             navigationButton("Home", icon: "house", target: .home)
+            navigationButton("Search", icon: "magnifyingglass", target: .search)
+            navigationButton("Labels", icon: "tag", target: .labels)
             navigationButton("Settings", icon: "gearshape", target: .settings)
             HStack {
                 Text("Meetings").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
@@ -92,7 +98,7 @@ struct SidebarView: View {
             guard editor == nil else { return }
             let meetings: [Meeting]
             if case .loaded(let values) = state { meetings = values } else { meetings = [] }
-            let targets: [Destination] = [.home, .settings] + meetings.map { .meeting($0.id) }
+            let targets: [Destination] = [.home, .search, .labels, .settings] + meetings.map { .meeting($0.id) }
             let index = targets.firstIndex(of: focusedDestination ?? .home) ?? 0
             switch direction {
             case .down: focusedDestination = targets[min(index + 1, targets.count - 1)]
@@ -110,13 +116,17 @@ struct SidebarView: View {
             InlineMeetingName(meeting: meeting, origin: .sidebar, editor: $editor,
                               isSaving: isSaving, begin: { rename(meeting.id) }, save: save, cancel: cancel)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            if !meeting.tags.isEmpty {
+                Image(systemName: "tag")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+            }
             if isRecording { RecordingIndicator() }
         }
         .padding(.horizontal, 8).padding(.vertical, 6)
-        .background(destination == target ? Color.accentColor.opacity(0.16) : .clear,
+        .background(rowBackground(for: target),
                     in: RoundedRectangle(cornerRadius: 6))
-        .overlay(RoundedRectangle(cornerRadius: 6)
-            .stroke(focusedDestination == target && editor == nil ? Color.accentColor : .clear, lineWidth: 2))
         .contentShape(Rectangle())
         .onTapGesture {
             if editor?.id != meeting.id {
@@ -129,19 +139,34 @@ struct SidebarView: View {
         .onKeyPress(.return) { guard editor == nil else { return .ignored }; navigate(target); return .handled }
         .onKeyPress(.space) { guard editor == nil else { return .ignored }; navigate(target); return .handled }
         .focusedValue(\.renameMeeting, editor == nil && !isSaving ? { rename(meeting.id) } : nil)
-        .contextMenu { Button("Rename") { rename(meeting.id) } }
+        .contextMenu {
+            Button("Rename") { rename(meeting.id) }
+            Button("Edit Description…", systemImage: "text.alignleft") { editDescription(meeting.id) }
+            Button("Labels…", systemImage: "tag") { editTags(meeting.id) }
+            Button("Delete Meeting…", role: .destructive) { delete(meeting.id) }
+                .disabled(!canDelete(meeting.id))
+        }
         .accessibilityElement(children: editor?.id == meeting.id ? .contain : .combine)
         .accessibilityLabel(editor?.id == meeting.id ? "" : meeting.name)
-        .accessibilityValue(isRecording ? "Recording" : "")
+        .accessibilityValue(accessibilityValue(for: meeting, isRecording: isRecording))
         .accessibilityAddTraits(destination == target ? [.isSelected] : [])
         .accessibilityAction {
             if editor == nil { focusedDestination = target }
             navigate(target)
         }
         .accessibilityAction(named: Text("Rename")) { rename(meeting.id) }
+        .accessibilityAction(named: Text("Edit Description")) { editDescription(meeting.id) }
+        .accessibilityAction(named: Text("Labels")) { editTags(meeting.id) }
         .onChange(of: editor == nil) { wasClosed, isClosed in
             if !wasClosed && isClosed && destination == target { focusedDestination = target }
         }
+    }
+
+    private func accessibilityValue(for meeting: Meeting, isRecording: Bool) -> String {
+        var values: [String] = []
+        if !meeting.tags.isEmpty { values.append("Labels: \(meeting.tags.map(\.name).joined(separator: ", "))") }
+        if isRecording { values.append("Recording") }
+        return values.joined(separator: ", ")
     }
 
     private func navigationButton(_ title: String, icon: String, target: Destination) -> some View {
@@ -150,10 +175,8 @@ struct SidebarView: View {
                 .lineLimit(1).truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 8).padding(.vertical, 6)
-                .background(destination == target ? Color.accentColor.opacity(0.16) : .clear,
+                .background(rowBackground(for: target),
                             in: RoundedRectangle(cornerRadius: 6))
-                .overlay(RoundedRectangle(cornerRadius: 6)
-                    .stroke(focusedDestination == target ? Color.accentColor : .clear, lineWidth: 2))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -161,5 +184,11 @@ struct SidebarView: View {
         .focused($focusedDestination, equals: target)
         .help(title)
         .accessibilityAddTraits(destination == target ? .isSelected : [])
+    }
+
+    private func rowBackground(for target: Destination) -> Color {
+        if destination == target { return Color.accentColor.opacity(0.16) }
+        if focusedDestination == target && editor == nil { return Color.primary.opacity(0.08) }
+        return .clear
     }
 }

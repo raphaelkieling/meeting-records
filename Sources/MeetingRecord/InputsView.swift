@@ -5,8 +5,11 @@ struct InputsView: View {
     let store: MeetingStore
     let revision: Int
     @ObservedObject var transcription: TranscriptionCoordinator
+    let revealLatest: Bool
     let openSettings: () -> Void
     @StateObject private var playback = RecordingPlayback()
+    @State private var didReveal = false
+    @State private var highlightedID: UUID?
     @State private var recordings: [Recording]?
     @State private var error: String?
     @State private var statuses: [UUID: TranscriptStatus] = [:]
@@ -17,38 +20,48 @@ struct InputsView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                if let error {
-                    Text(error).foregroundStyle(.red)
-                } else if let recordings {
-                    if let playbackError = playback.error {
-                        Text(playbackError)
-                            .foregroundStyle(.red)
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if let error {
+                        Text(error).foregroundStyle(.red)
+                    } else if let recordings {
+                        if let playbackError = playback.error {
+                            Text(playbackError)
+                                .foregroundStyle(.red)
+                        }
+                        if !recordings.isEmpty && !transcription.isReady {
+                            Button("Install a model to transcribe audio", action: openSettings)
+                                .buttonStyle(.link)
+                        }
+                        ForEach(Array(recordings.enumerated()), id: \.element.id) { index, recording in
+                            card(for: recording, index: index).id(recording.id)
+                        }
+                    } else {
+                        ProgressView().controlSize(.small).accessibilityLabel("Loading inputs")
                     }
-                    if !recordings.isEmpty && !transcription.isReady {
-                        Button("Install a model to transcribe audio", action: openSettings)
-                            .buttonStyle(.link)
-                    }
-                    ForEach(Array(recordings.enumerated()), id: \.element.id) { index, recording in
-                        card(for: recording, index: index)
-                    }
-                } else {
-                    ProgressView().controlSize(.small).accessibilityLabel("Loading inputs")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 12)
+                .background(alignment: .topLeading) {
+                    MeetingScrollbar().frame(width: 0, height: 0).accessibilityHidden(true)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, 12)
-            .background(alignment: .topLeading) {
-                MeetingScrollbar().frame(width: 0, height: 0).accessibilityHidden(true)
+            .contentMargins(.all, EdgeInsets(top: 0, leading: 0, bottom: 92, trailing: 12), for: .scrollContent)
+            .contentMargins(.vertical, 6, for: .scrollIndicators)
+            .task(id: highlightedID) {
+                guard let highlightedID else { return }
+                await Task.yield()
+                guard !Task.isCancelled else { return }
+                proxy.scrollTo(highlightedID, anchor: .center)
             }
         }
-        .contentMargins(.all, EdgeInsets(top: 0, leading: 0, bottom: 92, trailing: 12), for: .scrollContent)
-        .contentMargins(.vertical, 6, for: .scrollIndicators)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay {
             if error == nil, recordings?.isEmpty == true {
-                MeetingEmptyState("No inputs yet.", icon: "tray")
+                MeetingEmptyState("No inputs yet.", icon: "tray",
+                                  detail: "Record this meeting to add audio.")
+                    .offset(y: -20)
             }
         }
         .task(id: transcription.revision) {
@@ -66,6 +79,10 @@ struct InputsView: View {
                 let values = try await store.recordings(for: meetingID, includeActive: true)
                 guard !Task.isCancelled else { return }
                 recordings = values
+                if revealLatest && !didReveal {
+                    highlightedID = values.last(where: { $0.endedAt != nil })?.id
+                    didReveal = true
+                }
                 error = nil
             } catch {
                 guard !Task.isCancelled else { return }
@@ -78,6 +95,7 @@ struct InputsView: View {
     private func card(for recording: Recording, index: Int) -> some View {
         let title = "Recording \(index + 1)"
         let status = statuses[recording.id]?.status ?? .pending
+        let highlighted = revealLatest && highlightedID == recording.id
         let active = recording.endedAt == nil
         let playing = playback.activeID == recording.id
         let action = playing ? "Stop" : "Play"
@@ -125,8 +143,11 @@ struct InputsView: View {
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
         .overlay {
             RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(.quaternary)
+                .strokeBorder(highlighted ? Color.accentColor : Color.secondary.opacity(0.18),
+                              lineWidth: highlighted ? 2 : 1)
                 .allowsHitTesting(false)
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(highlighted ? .isSelected : [])
     }
 }

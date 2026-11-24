@@ -92,19 +92,8 @@ final class RecordingPlayback: ObservableObject {
             var end = CMTime.zero
             for clip in clips {
                 try Task.checkCancellation()
-                let path = clip.relativePath.split(separator: "/", omittingEmptySubsequences: false)
-                guard clip.startOffset >= 0, clip.frameCount > 0,
-                      path.count == 4, path.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." })
-                else { throw PlaybackError.unreadable }
-
-                let asset = AVURLAsset(url: root.appendingPathComponent(clip.relativePath))
-                guard let track = try await asset.loadTracks(withMediaType: .audio).first else {
-                    throw PlaybackError.unreadable
-                }
-                let range = try await track.load(.timeRange)
-                guard range.duration.isNumeric, range.duration > .zero else { throw PlaybackError.unreadable }
-
-                let offset = CMTime(value: clip.startOffset, timescale: 1_000_000_000)
+                let (asset, track, range, offset) = try await clipTiming(clip, root: root)
+                defer { withExtendedLifetime(asset) {} }
                 // Keep the earlier clip if adjacent checkpoints from one source overlap.
                 let start = max(end, offset)
                 let prefix = start - offset
@@ -125,6 +114,35 @@ final class RecordingPlayback: ObservableObject {
             return input
         }
         return (composition, mix)
+    }
+
+    nonisolated static func savedDuration(segments: [AudioSegment], root: URL) async throws -> TimeInterval {
+        guard !segments.isEmpty else { throw PlaybackError.noAudio }
+        var end = CMTime.zero
+        for clip in segments {
+            try Task.checkCancellation()
+            let (_, _, range, offset) = try await clipTiming(clip, root: root)
+            end = max(end, offset + range.duration)
+        }
+        return end.seconds
+    }
+
+    nonisolated private static func clipTiming(_ clip: AudioSegment, root: URL) async throws
+        -> (AVURLAsset, AVAssetTrack, CMTimeRange, CMTime) {
+        let path = clip.relativePath.split(separator: "/", omittingEmptySubsequences: false)
+        guard clip.startOffset >= 0, clip.frameCount > 0,
+              path.count == 4, path.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." })
+        else { throw PlaybackError.unreadable }
+
+        let asset = AVURLAsset(url: root.appendingPathComponent(clip.relativePath))
+        guard let track = try await asset.loadTracks(withMediaType: .audio).first else {
+            throw PlaybackError.unreadable
+        }
+        let range = try await track.load(.timeRange)
+        guard range.duration.isNumeric, range.duration > .zero else { throw PlaybackError.unreadable }
+
+        let offset = CMTime(value: clip.startOffset, timescale: 1_000_000_000)
+        return (asset, track, range, offset)
     }
 
     private enum PlaybackError: LocalizedError {

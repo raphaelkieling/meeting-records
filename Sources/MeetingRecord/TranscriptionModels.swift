@@ -15,9 +15,13 @@ struct TranscriptionModel: Identifiable, Equatable, Sendable {
     let files: [Asset]
 
     var downloadSize: Int64 { files.reduce(0) { $0 + $1.bytes } }
-    var version: String { Self.revision + ":" + tokenizerRevision }
+    var isNemotron: Bool { id == Self.nemotron.id }
+    var version: String { isNemotron ? "transcribe.cpp-0.4.2:" + tokenizerRevision : Self.revision + ":" + tokenizerRevision }
 
     func url(for asset: Asset) -> URL {
+        if isNemotron {
+            return URL(string: "https://huggingface.co/\(tokenizer)/resolve/\(tokenizerRevision)/\(asset.path)")!
+        }
         let repository = asset.tokenizer ? tokenizer : "argmaxinc/whisperkit-coreml"
         let revision = asset.tokenizer ? tokenizerRevision : Self.revision
         let path = asset.tokenizer ? asset.path : id + "/" + asset.path
@@ -25,7 +29,13 @@ struct TranscriptionModel: Identifiable, Equatable, Sendable {
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id }
-    static let catalog = [large, small, base]
+    static let catalog = [large, small, base, nemotron]
+
+    static let nemotron = TranscriptionModel(name: "Nemotron 3.5 ASR Streaming",
+        id: "nemotron-3.5-asr-streaming-0.6b",
+        tokenizer: "handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf",
+        tokenizerRevision: "53ce288f69326b415aeef030cfcb02a08a8096dd",
+        files: [.init(path: "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf", bytes: 751_094_240, tokenizer: false)])
 
     static let large = TranscriptionModel(name: "Whisper Large v3", id: "openai_whisper-large-v3-v20240930_626MB",
         tokenizer: "openai/whisper-large-v3", tokenizerRevision: "06f233fe06e710322aca913c1bc4249a0d71fce1", files: [

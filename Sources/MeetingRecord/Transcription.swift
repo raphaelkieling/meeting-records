@@ -13,6 +13,7 @@ struct TranscriptStatus: Sendable {
 
 struct TranscriptionWork: Sendable {
     let audio: AudioSegment
+    let audioSegments: [AudioSegment]
     let modelID: String?
     let modelVersion: String?
 }
