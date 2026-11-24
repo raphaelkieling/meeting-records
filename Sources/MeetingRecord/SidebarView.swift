@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct SidebarView: View {
     let destination: Destination
@@ -143,6 +144,7 @@ struct SidebarView: View {
             Button("Rename") { rename(meeting.id) }
             Button("Edit Description…", systemImage: "text.alignleft") { editDescription(meeting.id) }
             Button("Labels…", systemImage: "tag") { editTags(meeting.id) }
+            Button("Copy Link as Markdown", systemImage: "link") { copyMeetingLink(meeting) }
             Button("Delete Meeting…", role: .destructive) { delete(meeting.id) }
                 .disabled(!canDelete(meeting.id))
         }
@@ -157,9 +159,16 @@ struct SidebarView: View {
         .accessibilityAction(named: Text("Rename")) { rename(meeting.id) }
         .accessibilityAction(named: Text("Edit Description")) { editDescription(meeting.id) }
         .accessibilityAction(named: Text("Labels")) { editTags(meeting.id) }
+        .accessibilityAction(named: Text("Copy Link as Markdown")) { copyMeetingLink(meeting) }
         .onChange(of: editor == nil) { wasClosed, isClosed in
             if !wasClosed && isClosed && destination == target { focusedDestination = target }
         }
+    }
+
+    private func copyMeetingLink(_ meeting: Meeting) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(MeetingLink.markdown(for: meeting), forType: .string)
     }
 
     private func accessibilityValue(for meeting: Meeting, isRecording: Bool) -> String {

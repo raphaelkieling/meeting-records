@@ -53,6 +53,8 @@ struct ContentView: View {
     @State private var durationError: String?
     @State private var savedDurations: [UUID: TimeInterval] = [:]
     @State private var destination: Destination = .home
+    @State private var linkedMeetingID: UUID?
+    @State private var linkError: String?
     @State private var state: MeetingLoadState = .loading
     @State private var editor: RenameSession?
     @State private var isSaving = false
@@ -224,6 +226,29 @@ struct ContentView: View {
         .task { await loadMeetings() }
         .task { await recording.recover() }
         .task { await recording.finishMeetingDeletions() }
+        .onOpenURL { url in
+            linkedMeetingID = MeetingLink.meetingID(from: url)
+            linkError = linkedMeetingID == nil ? "This meeting link is invalid." : nil
+        }
+        .task(id: linkedMeetingID) {
+            guard let id = linkedMeetingID else { return }
+            if !meetings.contains(where: { $0.id == id }) { await loadMeetings() }
+            guard !Task.isCancelled else { return }
+            linkedMeetingID = nil
+            if meetings.contains(where: { $0.id == id }) {
+                request(.navigate(.meeting(id)))
+            } else if case .failed(let message) = state {
+                linkError = message
+            } else {
+                linkError = "This meeting is not in your local library."
+            }
+        }
+        .alert("Could Not Open Meeting Link", isPresented: Binding(get: { linkError != nil },
+                                                                   set: { if !$0 { linkError = nil } })) {
+            Button("OK") { linkError = nil }
+        } message: {
+            Text(linkError ?? "")
+        }
         .alert("Recording", isPresented: Binding(get: { recording.error != nil },
                                                  set: { if !$0 { recording.error = nil } })) {
             Button("OK") { recording.error = nil }
