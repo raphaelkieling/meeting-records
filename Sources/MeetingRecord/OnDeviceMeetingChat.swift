@@ -176,6 +176,16 @@ private actor ChatTurnEvidence {
             hits.append(match)
             sources.insert(match.citation.meetingID)
             result.append(line(for: match, number: hits.count, body: String(decoding: match.body.utf8.prefix(bytes), as: UTF8.self)))
+            for capture in try await store.screenCaptureEvidence(near: match) {
+                if let index = hits.firstIndex(where: { $0.citation == capture.citation }) {
+                    result.append(line(for: capture, number: index + 1, body: capture.body))
+                } else {
+                    guard remainingBytes >= 200 else { break }
+                    remainingBytes -= 200
+                    hits.append(capture)
+                    result.append(line(for: capture, number: hits.count, body: capture.body))
+                }
+            }
         }
         return result
     }

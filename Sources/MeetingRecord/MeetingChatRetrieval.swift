@@ -11,6 +11,7 @@ struct ChatEvidence: Sendable {
     let title: String
     let body: String
     let citation: ChatCitation
+    var endOffset: Int64? = nil
 }
 
 struct ChatMeetingMatch: Codable, Sendable {
@@ -30,6 +31,7 @@ enum MeetingChatRetrieval {
         Choose short topic keywords from the question and conversation context. Call searchTranscript with those keywords and any relevant meeting IDs to verify what happened.
         If no meeting is established, use an empty meetingIDs list to search the full selected scope, even when searchMeetings returned no candidates.
         If the transcript search is empty, retry with a shorter keyword, a likely wording variant, or a broader meeting scope within the user's selection.
+        Transcript search can also return numbered screen capture references near matching passages. Cite a capture by its number when it helps the user inspect that moment. Capture references provide timing only.
         Verify details from summaries against the transcript and cite transcript evidence for what happened. Use meeting metadata for facts such as titles, dates, and invitees.
         """
 

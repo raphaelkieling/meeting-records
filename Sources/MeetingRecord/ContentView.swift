@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 enum Destination: Hashable {
@@ -163,6 +164,7 @@ struct ContentView: View {
                                            transcription: transcription, revealLatest: revealLatestRecording,
                                            openSettings: { request(.openModelSettings) },
                                            openCalendar: { date in calendarFocusDate = date; destination = .calendar },
+                                           deleteScreenCapture: recording.deleteScreenCapture,
                                            deleteRecording: recording.deleteRecording,
                                            removeCalendarLink: { try await removeCalendarLink(from: meeting.id) })
                                     .id(meeting.id)
@@ -192,7 +194,8 @@ struct ContentView: View {
                     .overlay(alignment: .bottom) {
                         RecordingControl(state: recording.state, meetingID: meeting.id, levels: recording.levels,
                                          modelReady: transcription.isReady,
-                                         openSettings: { request(.openModelSettings) }) {
+                                         openSettings: { request(.openModelSettings) },
+                                         captureScreen: recording.takeScreenCapture) {
                             recording.toggle(for: meeting.id)
                         }
                         .padding(.bottom, 12)
@@ -204,7 +207,8 @@ struct ContentView: View {
                         MeetingChatView(chat: recording.chat, meetings: meetings,
                                         openAISettings: { settingsSection = .ai; destination = .settings },
                                         returnToMessage: citationReplyID,
-                                        openCitation: openChatCitation)
+                                        openCitation: openChatCitation,
+                                        store: store, recordingRevision: recording.revision)
                     } else if destination == .settings {
                         SettingsView(section: $settingsSection, transcription: transcription, recording: recording,
                                      deleteAll: deleteAllMeetingData)
@@ -291,6 +295,17 @@ struct ContentView: View {
             Button("OK") { recording.error = nil }
         } message: {
             Text(recording.error ?? "")
+        }
+        .alert("Screen Capture", isPresented: Binding(get: { recording.screenCaptureError != nil },
+                                                      set: { if !$0 { recording.screenCaptureError = nil } })) {
+            Button("Open System Settings") {
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            Button("OK", role: .cancel) { recording.screenCaptureError = nil }
+        } message: {
+            Text(recording.screenCaptureError ?? "")
         }
         .alert("Delete Meeting?", isPresented: Binding(get: { pendingDeletion != nil },
                                                       set: { if !$0 { pendingDeletion = nil } }),
@@ -560,7 +575,11 @@ struct ContentView: View {
     }
 
     private func openChatCitation(_ citation: ChatCitation, replyID: UUID) async -> Bool {
-        await openPassage(citation, replyID: replyID)
+        if citation.screenCaptureID != nil {
+            guard let url = try? await store.screenCaptureURL(for: citation) else { return false }
+            return NSWorkspace.shared.open(url)
+        }
+        return await openPassage(citation, replyID: replyID)
     }
 
     private func openPassage(_ citation: ChatCitation, replyID: UUID? = nil) async -> Bool {

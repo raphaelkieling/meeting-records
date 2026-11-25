@@ -50,10 +50,14 @@ struct ChatCitation: Identifiable, Codable, Sendable, Hashable {
     let startOffset: Int64
     let revision: Int64
 
-    var id: String { "\(recordingID):\(revision):\(passageIDs.first ?? "")" }
+    var screenCaptureID: UUID? = nil
 
-    var timestamp: String {
-        let seconds = startOffset / 1_000_000_000
+    var id: String { "\(recordingID):\(revision):\(screenCaptureID?.uuidString ?? passageIDs.first ?? "")" }
+
+    var timestamp: String { Self.timestamp(at: startOffset) }
+
+    static func timestamp(at offset: Int64) -> String {
+        let seconds = offset / 1_000_000_000
         return String(format: "%lld:%02lld", seconds / 60, seconds % 60)
     }
 }

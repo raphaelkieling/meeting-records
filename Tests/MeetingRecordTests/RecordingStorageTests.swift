@@ -32,6 +32,40 @@ final class RecordingStorageTests: XCTestCase {
         XCTAssertEqual(bytesAfterDeletion, 0)
     }
 
+    func testScreenCaptureReferencesAndStorageFollowRecordingLifecycle() async throws {
+        let (store, root, recording) = try await fixture()
+        let storage = RecordingStorage(store: store, root: root, recording: recording)
+        _ = try await storage.append(sample(source: .me, offset: 0, value: 0.25))
+        try await store.saveScreenCapture(Data([1, 2, 3]), recording: recording, offset: 2_000_000_000)
+        try await store.saveScreenCapture(Data([4, 5, 6]), recording: recording, offset: 120_000_000_000)
+        try await storage.finish()
+        let saved = try await store.finalizeRecording(recording.id, endedAt: Date(), interrupted: false)
+        XCTAssertTrue(saved)
+
+        let captures = try await store.screenCaptures(meetingID: recording.meetingID, recordingID: recording.id)
+        XCTAssertEqual(captures.map(\.offset), [2_000_000_000, 120_000_000_000])
+        let transcript = ChatEvidence(title: "Recording Test", body: "An excerpt",
+            citation: ChatCitation(meetingID: recording.meetingID, recordingID: recording.id,
+                passageIDs: ["passage"], startOffset: 0, revision: 1))
+        let references = try await store.screenCaptureEvidence(near: transcript)
+        XCTAssertEqual(references.map { $0.citation.screenCaptureID }, [captures.first?.id])
+        let citation = try XCTUnwrap(references.first?.citation)
+        let isCurrent = try await store.isChatCitationCurrent(citation)
+        XCTAssertTrue(isCurrent)
+        let usage = try await RecordingStorage.usage(at: root)
+        XCTAssertGreaterThan(usage.images, 0)
+        XCTAssertGreaterThan(usage.audio, 0)
+
+        try await store.deleteScreenCapture(captures[0].id, meetingID: recording.meetingID, recordingID: recording.id)
+        let isCurrentAfterDeletion = try await store.isChatCitationCurrent(citation)
+        XCTAssertFalse(isCurrentAfterDeletion)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: captures[1].url.path))
+
+        try await store.deleteRecording(recording)
+        _ = try await RecordingStorage.finishMeetingDeletions(store: store)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: captures[1].url.path))
+    }
+
     func testRecoversPublishedCheckpointMissingFromSQLite() async throws {
         let (store, root, recording) = try await fixture()
         do {

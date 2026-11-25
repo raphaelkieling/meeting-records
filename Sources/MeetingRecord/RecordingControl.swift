@@ -7,6 +7,7 @@ struct RecordingControl: View {
     let levels: CurrentValueSubject<Double, Never>
     let modelReady: Bool
     let openSettings: () -> Void
+    let captureScreen: () -> Void
     let action: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var level = 0.0
@@ -36,6 +37,14 @@ struct RecordingControl: View {
                     .frame(width: 62, height: 26)
                     .accessibilityHidden(true)
                     .transition(.opacity)
+                }
+                if isRecording {
+                    Button("Capture Screen", systemImage: "camera", action: captureScreen)
+                        .labelStyle(.iconOnly)
+                        .foregroundStyle(.white)
+                        .frame(width: 36, height: 50)
+                        .buttonStyle(.plain)
+                        .help("Capture Screen")
                 }
                 Button(action: action) {
                     Group {

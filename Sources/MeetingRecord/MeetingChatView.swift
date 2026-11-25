@@ -6,6 +6,8 @@ struct MeetingChatView: View {
     let openAISettings: () -> Void
     let returnToMessage: UUID?
     let openCitation: (ChatCitation, UUID) async -> Bool
+    let store: MeetingStore
+    let recordingRevision: Int
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     @FocusState private var composerFocused: Bool
@@ -170,15 +172,22 @@ struct MeetingChatView: View {
                 }
                 ForEach(message.citations) { citation in
                     let title = meetings.first(where: { $0.id == citation.meetingID })?.name
-                    if let title, !unavailableCitations.contains(citation.id) {
-                        Button {
-                            Task { if !(await openCitation(citation, message.id)) { unavailableCitations.insert(citation.id) } }
-                        } label: {
-                            Label("\(title) · \(citation.timestamp)", systemImage: "text.bubble")
+                    Group {
+                        if let title, !unavailableCitations.contains(citation.id) {
+                            Button {
+                                Task { if !(await openCitation(citation, message.id)) { unavailableCitations.insert(citation.id) } }
+                            } label: {
+                                Label("\(title) · \(citation.timestamp)", systemImage: citation.screenCaptureID == nil ? "text.bubble" : "photo")
+                            }
+                            .buttonStyle(.link)
+                        } else {
+                            Text("Source unavailable").foregroundStyle(.secondary).font(.caption)
                         }
-                        .buttonStyle(.link)
-                    } else {
-                        Text("Source unavailable").foregroundStyle(.secondary).font(.caption)
+                    }
+                    .task(id: recordingRevision) {
+                        guard citation.screenCaptureID != nil else { return }
+                        let available = (try? await store.isChatCitationCurrent(citation)) == true
+                        if !Task.isCancelled, !available { unavailableCitations.insert(citation.id) }
                     }
                 }
             }

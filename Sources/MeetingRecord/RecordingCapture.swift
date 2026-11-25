@@ -154,6 +154,14 @@ final class RecordingCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDele
         emit(buffer, source: .me, clock: microphone.synchronizationClock)
     }
 
+    var currentTimelineOffset: Int64 {
+        max(0, timelineOffset(at: CMClockGetTime(hostClock)).value)
+    }
+
+    private func timelineOffset(at time: CMTime) -> CMTime {
+        CMTimeConvertScale(CMTimeSubtract(time, origin), timescale: 1_000_000_000, method: .default)
+    }
+
     private func emit(_ buffer: CMSampleBuffer, source: AudioSegment.Source, clock: CMClock?) {
         guard buffer.isValid, buffer.numSamples > 0 else { return }
         guard let clock else {
@@ -161,7 +169,7 @@ final class RecordingCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDele
             return
         }
         let time = CMSyncConvertTime(buffer.presentationTimeStamp, from: clock, to: hostClock)
-        let offset = CMTimeConvertScale(CMTimeSubtract(time, origin), timescale: 1_000_000_000, method: .default)
+        let offset = timelineOffset(at: time)
         guard offset.isNumeric else {
             continuation.finish(throwing: RecordingError.invalidAudio)
             return

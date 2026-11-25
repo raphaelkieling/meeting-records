@@ -85,7 +85,17 @@ actor RecordingStorage {
         catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile {}
     }
 
+    struct Usage: Sendable {
+        var audio: Int64 = 0
+        var images: Int64 = 0
+        var total: Int64 { audio + images }
+    }
+
     static func bytesUsed(at root: URL) async throws -> Int64 {
+        try await usage(at: root).total
+    }
+
+    static func usage(at root: URL) async throws -> Usage {
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .totalFileAllocatedSizeKey, .fileAllocatedSizeKey]
         var enumerationError: (any Error)?
         let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: Array(keys),
@@ -95,19 +105,23 @@ actor RecordingStorage {
             enumerationError = error
             return false
         }
-        var bytes: Int64 = 0
+        var usage = Usage()
         while let url = files?.nextObject() as? URL {
             try Task.checkCancellation()
-            guard url.pathExtension == "caf" else { continue }
+            let isAudio = url.pathExtension == "caf"
+            let isImage = url.pathExtension == "jpg" && url.deletingLastPathComponent().lastPathComponent == "Screen Captures"
+            guard isAudio || isImage else { continue }
             do {
                 let values = try url.resourceValues(forKeys: keys)
                 if values.isRegularFile == true {
-                    bytes += Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? 0)
+                    let bytes = Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? 0)
+                    if isAudio { usage.audio += bytes }
+                    else { usage.images += bytes }
                 }
             } catch let error as CocoaError where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile {}
         }
         if let enumerationError { throw enumerationError }
-        return bytes
+        return usage
     }
 
     static func recover(store: MeetingStore, root: URL) async throws {

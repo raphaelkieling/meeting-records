@@ -9,7 +9,6 @@ struct TranscriptionView: View {
     var citedPassageID: String?
     var citedPassageRevision: Int
     @State private var inputs: [Recording] = []
-    @State private var passages: [UUID: [TranscriptPassage]] = [:]
     @State private var statuses: [UUID: TranscriptStatus] = [:]
     @State private var error: String?
     @State private var hasLoaded = false
@@ -28,11 +27,21 @@ struct TranscriptionView: View {
     private enum Row: Identifiable {
         case header(Recording, Int)
         case passage(TranscriptPassage, canPlay: Bool)
+        case capture(MeetingScreenCapture)
+
+        var offset: Int64 {
+            switch self {
+            case .header: 0
+            case .passage(let passage, _): passage.startOffset
+            case .capture(let capture): capture.offset
+            }
+        }
 
         var id: String {
             switch self {
             case .header(let recording, _): "header-\(recording.id)"
             case .passage(let passage, _): passage.id
+            case .capture(let capture): capture.id.uuidString
             }
         }
     }
@@ -132,6 +141,8 @@ struct TranscriptionView: View {
                         .id(row.id)
                     case .passage(let passage, let canPlay):
                         passageRow(passage, canPlay: canPlay).id(row.id)
+                    case .capture(let capture):
+                        ScreenCaptureThumbnail(capture: capture).id(row.id)
                     }
                 }
             }
@@ -161,7 +172,7 @@ struct TranscriptionView: View {
                 if !hasLoaded {
                     ProgressView("Loading transcription…")
                         .transition(.opacity)
-                } else if passages.isEmpty {
+                } else if rows.isEmpty {
                     MeetingEmptyState("No transcription yet.", icon: "text.bubble",
                                       detail: context ?? "Transcripts appear here after your recordings are processed.")
                         .offset(y: -20)
@@ -175,13 +186,20 @@ struct TranscriptionView: View {
                 let inputs = try await store.recordings(for: meetingID, includeActive: true)
                 let rows = try await store.transcriptPassages(for: meetingID)
                 let statuses = try await store.transcriptStatuses(for: meetingID)
+                var timeline: [Row] = []
+                let passagesByInput = Dictionary(grouping: rows, by: \.inputID)
+                for (index, input) in inputs.enumerated() {
+                    let captures = try await store.screenCaptures(meetingID: meetingID, recordingID: input.id)
+                    let passages = passagesByInput[input.id, default: []]
+                    let entries = passages.map { Row.passage($0, canPlay: input.endedAt != nil) } + captures.map(Row.capture)
+                    if !entries.isEmpty {
+                        timeline.append(.header(input, index))
+                        timeline.append(contentsOf: entries.sorted { $0.offset < $1.offset })
+                    }
+                }
                 guard !Task.isCancelled else { return }
                 self.inputs = inputs
-                passages = Dictionary(grouping: rows, by: \.inputID)
-                self.rows = inputs.enumerated().flatMap { index, input -> [Row] in
-                    guard let group = passages[input.id], !group.isEmpty else { return [] }
-                    return [.header(input, index)] + group.map { .passage($0, canPlay: input.endedAt != nil) }
-                }
+                self.rows = timeline
                 updateMatches(jump: false)
                 self.statuses = statuses
                 error = nil

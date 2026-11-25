@@ -43,6 +43,7 @@ struct RecordingPermissionsView: View {
             }
             HStack {
                 Label("Screen & System Audio", systemImage: "waveform")
+                    .help("Allows system audio recording and screen captures.")
                 Spacer()
                 if screenCaptureAllowed == true {
                     Label("Ready", systemImage: "checkmark.circle.fill")

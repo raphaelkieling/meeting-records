@@ -206,16 +206,19 @@ private actor GPTMeetingTools {
         var result: [TranscriptLine] = []
         for match in matches {
             guard try await store.isChatCitationCurrent(match.citation) else { continue }
-            let index: Int
-            if let existing = hits.firstIndex(where: { $0.citation == match.citation }) {
-                index = existing
-            } else {
-                index = hits.count
-                hits.append(match)
+            let captures = try await store.screenCaptureEvidence(near: match)
+            for source in [match] + captures {
+                let index: Int
+                if let existing = hits.firstIndex(where: { $0.citation == source.citation }) {
+                    index = existing
+                } else {
+                    index = hits.count
+                    hits.append(source)
+                }
+                sources.insert(source.citation.meetingID)
+                result.append(TranscriptLine(evidence: index + 1, meeting: source.title,
+                    timestamp: source.citation.timestamp, text: source.body))
             }
-            sources.insert(match.citation.meetingID)
-            result.append(TranscriptLine(evidence: index + 1, meeting: match.title,
-                timestamp: match.citation.timestamp, text: match.body))
         }
         return result
     }

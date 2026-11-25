@@ -10,12 +10,16 @@ struct InputsView: View {
     let revealLatest: Bool
     let openSettings: () -> Void
     let openCalendar: (Date) -> Void
+    let deleteScreenCapture: (UUID, UUID, UUID) async throws -> Void
     let deleteRecording: (Recording) async throws -> Void
     let removeCalendarLink: () async throws -> Void
     @StateObject private var playback = RecordingPlayback()
     @State private var didReveal = false
     @State private var highlightedID: UUID?
     @State private var recordings: [Recording]?
+    @State private var captures: [UUID: [MeetingScreenCapture]] = [:]
+    @State private var captureToDelete: MeetingScreenCapture?
+    @State private var captureRecordingID: UUID?
     @State private var error: String?
     @State private var statuses: [UUID: TranscriptStatus] = [:]
     @State private var pendingRemoval: Recording?
@@ -47,7 +51,22 @@ struct InputsView: View {
                                 .buttonStyle(.link)
                         }
                         ForEach(Array(recordings.enumerated()), id: \.element.id) { index, recording in
-                            card(for: recording, index: index).id(recording.id)
+                            VStack(alignment: .leading, spacing: 8) {
+                                card(for: recording, index: index).id(recording.id)
+                                ForEach(captures[recording.id, default: []]) { capture in
+                                    HStack {
+                                        ScreenCaptureThumbnail(capture: capture)
+                                        Spacer()
+                                        Button("Delete Screen Capture", systemImage: "trash") {
+                                            captureRecordingID = recording.id
+                                            captureToDelete = capture
+                                        }
+                                        .labelStyle(.iconOnly)
+                                        .help("Delete Screen Capture")
+                                    }
+                                    .padding(.horizontal, 12)
+                                }
+                            }
                         }
                     } else {
                         ProgressView().controlSize(.small).accessibilityLabel("Loading inputs")
@@ -100,12 +119,30 @@ struct InputsView: View {
                 self.error = "Could not load transcription status. \(error.localizedDescription)"
             } catch {}
         }
+        .confirmationDialog("Delete Screen Capture?", isPresented: Binding(
+            get: { captureToDelete != nil }, set: { if !$0 { captureToDelete = nil } }
+        ), titleVisibility: .visible, presenting: captureToDelete) { capture in
+            Button("Delete Screen Capture", role: .destructive) {
+                guard let recordingID = captureRecordingID else { return }
+                Task {
+                    do { try await deleteScreenCapture(capture.id, meetingID, recordingID) }
+                    catch { removalError = "Could not delete screen capture. \(error.localizedDescription)" }
+                }
+            }
+        } message: { _ in
+            Text("This permanently removes the image and makes its reference in chat unavailable.")
+        }
         .onDisappear { playback.stop() }
         .task(id: LoadKey(meetingID: meetingID, revision: revision)) {
             do {
                 let values = try await store.recordings(for: meetingID, includeActive: true)
+                var saved: [UUID: [MeetingScreenCapture]] = [:]
+                for recording in values {
+                    saved[recording.id] = try await store.screenCaptures(meetingID: meetingID, recordingID: recording.id)
+                }
                 guard !Task.isCancelled else { return }
                 recordings = values
+                captures = saved
                 if revealLatest && !didReveal {
                     highlightedID = values.last(where: { $0.endedAt != nil })?.id
                     didReveal = true

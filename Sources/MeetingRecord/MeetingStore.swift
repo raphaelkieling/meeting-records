@@ -687,6 +687,18 @@ extension MeetingStore {
                 try finish(update)
                 if sqlite3_changes(db) == 1 { return true }
 
+                let owners = try chatRows("""
+                    SELECT meetingID FROM recordings WHERE id = ? AND state IN ('starting', 'recording')
+                    """, [id.uuidString], db: db) { row in
+                        text(row, column: 0).flatMap(UUID.init(uuidString:))
+                    }
+                if let owner = owners.first ?? nil,
+                   try !screenCaptures(meetingID: owner, recordingID: id).isEmpty {
+                    try chatWrite("""
+                        INSERT INTO pending_recording_deletions (recordingID, meetingID)
+                        VALUES (?, ?)
+                        """, [id.uuidString, owner.uuidString], db: db)
+                }
                 let remove = try prepare("DELETE FROM recordings WHERE id = ? AND state IN ('starting', 'recording')", db: db)
                 defer { sqlite3_finalize(remove) }
                 try bind(id.uuidString, at: 1, to: remove)
@@ -1532,7 +1544,7 @@ extension MeetingStore {
         let end = until.map { String($0.timeIntervalSince1970) }
         return try withDatabase { db in
             try chatRows("""
-                SELECT r.meetingID, r.id, c.passageIDs, c.startOffset, j.chatRevision, m.name, f.body
+                SELECT r.meetingID, r.id, c.passageIDs, c.startOffset, j.chatRevision, m.name, f.body, c.endOffset
                 FROM chat_fts f JOIN chat_chunks c ON c.id = f.rowid
                 JOIN chat_indexed x ON x.recordingID = c.recordingID
                 JOIN recordings r ON r.id = c.recordingID JOIN meetings m ON m.id = r.meetingID
@@ -1551,7 +1563,8 @@ extension MeetingStore {
                       let body = text(row, column: 6) else { throw MeetingStoreError.invalidRecord }
                 return ChatEvidence(title: title, body: body, citation: ChatCitation(meetingID: meetingID,
                     recordingID: recordingID, passageIDs: try JSONDecoder().decode([String].self, from: Data(ids.utf8)),
-                    startOffset: sqlite3_column_int64(row, 3), revision: sqlite3_column_int64(row, 4)))
+                    startOffset: sqlite3_column_int64(row, 3), revision: sqlite3_column_int64(row, 4)),
+                    endOffset: sqlite3_column_int64(row, 7))
             }
         }
     }
@@ -1650,6 +1663,7 @@ extension MeetingStore {
     }
 
     func isChatCitationCurrent(_ citation: ChatCitation) throws -> Bool {
+        if citation.screenCaptureID != nil { return try screenCaptureURL(for: citation) != nil }
         guard let first = citation.passageIDs.first else { return false }
         return try withDatabase { db in
             guard try chatRecordingRevision(citation.recordingID, db: db) == citation.revision else { return false }

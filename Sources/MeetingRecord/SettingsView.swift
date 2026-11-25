@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import Combine
 import SwiftUI
@@ -27,7 +28,9 @@ struct SettingsView: View {
     let deleteAll: () -> Void
     @State private var hasMoreBelow = false
     @State private var confirmingDeleteAll = false
-    @State private var recordingUsage = "Calculating…"
+    @State private var recordingUsage: RecordingStorage.Usage?
+    @State private var storageUnavailable = false
+    @State private var folderError: String?
 
     var body: some View {
         ScrollView {
@@ -89,6 +92,10 @@ struct SettingsView: View {
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
     }
 
+    private func storageSize(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
     @ViewBuilder
     private func sectionContent(_ option: SettingsSection) -> some View {
         switch option {
@@ -101,10 +108,39 @@ struct SettingsView: View {
         case .data:
             VStack(alignment: .leading, spacing: 12) {
                 LabeledContent("Recording Storage") {
-                    Text(recordingUsage)
+                    Text(recordingUsage.map { storageSize($0.total) } ?? (storageUnavailable ? "Unavailable" : "Calculating…"))
                         .foregroundStyle(.secondary)
                 }
-                Text("Permanently remove all meetings and their saved recordings, transcripts, summaries, and chats from this Mac.")
+                if let usage = recordingUsage {
+                    GeometryReader { geometry in
+                        let audioShare = usage.total == 0 ? 0 : Double(usage.audio) / Double(usage.total)
+                        HStack(spacing: 0) {
+                            Color.accentColor.frame(width: geometry.size.width * audioShare)
+                            if usage.images > 0 { Color.purple }
+                        }
+                        .background(.quaternary)
+                        .clipShape(Capsule())
+                    }
+                    .frame(height: 10)
+                    .accessibilityHidden(true)
+                    HStack(spacing: 16) {
+                        Label("Audio · \(storageSize(usage.audio))", systemImage: "waveform").foregroundStyle(Color.accentColor)
+                        Label("Images · \(storageSize(usage.images))", systemImage: "photo").foregroundStyle(Color.purple)
+                    }
+                    .font(.caption)
+                }
+                Button("Open Recordings Folder", systemImage: "folder") {
+                    Task {
+                        do {
+                            let root = try await recording.store.recordingRoot()
+                            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                            if !NSWorkspace.shared.open(root) { throw CocoaError(.fileReadUnknown) }
+                            folderError = nil
+                        } catch { folderError = "Could not open the recordings folder. \(error.localizedDescription)" }
+                    }
+                }
+                if let folderError { Text(folderError).font(.caption).foregroundStyle(.red) }
+                Text("Permanently remove all meetings and their saved recordings, screen captures, transcripts, summaries, and chats from this Mac.")
                     .foregroundStyle(.secondary)
                 Button("Delete All Meeting Data…", role: .destructive) {
                     confirmingDeleteAll = true
@@ -120,16 +156,18 @@ struct SettingsView: View {
                 do {
                     let root = try await recording.store.recordingRoot()
                     repeat {
-                        let bytes = try await RecordingStorage.bytesUsed(at: root)
+                        let usage = try await RecordingStorage.usage(at: root)
                         try Task.checkCancellation()
-                        let gigabytes = (Double(bytes) / 1_000_000_000)
-                            .formatted(.number.precision(.fractionLength(3)))
-                        recordingUsage = bytes > 0 && bytes < 1_000_000 ? "< 0.001 GB" : "\(gigabytes) GB"
+                        recordingUsage = usage
+                        storageUnavailable = false
                         guard case .recording = recording.state else { break }
                         try await Task.sleep(for: .seconds(10))
                     } while !Task.isCancelled
                 } catch {
-                    if !Task.isCancelled { recordingUsage = "Unavailable" }
+                    if !Task.isCancelled {
+                        recordingUsage = nil
+                        storageUnavailable = true
+                    }
                 }
             }
         }
@@ -149,6 +187,14 @@ private struct GeneralSettings: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             RecordingPermissionsView(microphoneAllowed: $microphoneAllowed)
+            Divider()
+            SettingsHeading("Screen Captures")
+            Toggle("Automatic Screen Captures", isOn: Binding(get: { recording.automaticScreenCaptures },
+                                                               set: recording.setAutomaticScreenCaptures))
+            Stepper("Capture every \(recording.screenCaptureInterval) min",
+                    value: Binding(get: { recording.screenCaptureInterval }, set: recording.setScreenCaptureInterval),
+                    in: 1...60)
+                .disabled(!recording.automaticScreenCaptures)
             if microphoneAllowed == true {
                 Divider()
                 Picker("Microphone Input", selection: Binding(get: { recording.microphoneID },

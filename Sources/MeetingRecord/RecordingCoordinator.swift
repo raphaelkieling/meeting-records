@@ -36,6 +36,7 @@ final class RecordingCoordinator: ObservableObject {
     @Published private(set) var state = State.idle
     @Published private(set) var revision = 0
     @Published var error: String?
+    @Published var screenCaptureError: String?
     @Published private(set) var cleanupError: String?
     @Published private var deletingMeetings: Set<UUID> = []
     private var isCleaningUp = false
@@ -43,6 +44,69 @@ final class RecordingCoordinator: ObservableObject {
     let levels = CurrentValueSubject<Double, Never>(0)
     let microphoneRMS = CurrentValueSubject<Double, Never>(0)
     private var session: Session?
+    private var screenCaptureTimer: Task<Void, Never>?
+    private var manualScreenCapture: Task<Void, Never>?
+    @Published private(set) var automaticScreenCaptures = UserDefaults.standard.bool(forKey: "automaticScreenCaptures")
+    @Published private(set) var screenCaptureInterval = (1...60).contains(UserDefaults.standard.integer(forKey: "screenCaptureInterval"))
+        ? UserDefaults.standard.integer(forKey: "screenCaptureInterval") : 10
+
+    func setAutomaticScreenCaptures(_ enabled: Bool) {
+        automaticScreenCaptures = enabled
+        UserDefaults.standard.set(enabled, forKey: "automaticScreenCaptures")
+        scheduleScreenCaptures()
+    }
+
+    func setScreenCaptureInterval(_ minutes: Int) {
+        screenCaptureInterval = min(60, max(1, minutes))
+        UserDefaults.standard.set(screenCaptureInterval, forKey: "screenCaptureInterval")
+        scheduleScreenCaptures()
+    }
+
+    private func scheduleScreenCaptures() {
+        screenCaptureTimer?.cancel()
+        screenCaptureTimer = nil
+        guard automaticScreenCaptures, case .recording = state else { return }
+        let interval = Duration.seconds(screenCaptureInterval * 60)
+        screenCaptureTimer = Task { [weak self] in
+            let clock = ContinuousClock()
+            var deadline = clock.now.advanced(by: interval)
+            while !Task.isCancelled {
+                do { try await clock.sleep(until: deadline) }
+                catch { return }
+                await self?.captureScreen()
+                repeat { deadline = deadline.advanced(by: interval) } while deadline <= clock.now
+            }
+        }
+    }
+
+    func takeScreenCapture() {
+        guard manualScreenCapture == nil else { return }
+        manualScreenCapture = Task { [weak self] in
+            await self?.captureScreen()
+            self?.manualScreenCapture = nil
+        }
+    }
+
+    private func captureScreen() async {
+        guard case .recording = state, let session, !Task.isCancelled else { return }
+        let recording = session.recording
+        do {
+            let shot = try await MeetingScreenCapture.jpeg(timeline: session.capture)
+            guard self.session?.recording.id == recording.id else { return }
+            try await store.saveScreenCapture(shot.data, recording: recording, offset: shot.offset)
+            revision += 1
+        } catch is CancellationError {
+        } catch {
+            guard self.session?.recording.id == recording.id, !Task.isCancelled else { return }
+            screenCaptureError = "Could not capture the screen. \(error.localizedDescription)"
+        }
+    }
+
+    func deleteScreenCapture(_ id: UUID, meetingID: UUID, recordingID: UUID) async throws {
+        try await store.deleteScreenCapture(id, meetingID: meetingID, recordingID: recordingID)
+        revision += 1
+    }
+
     private var autoStop: RecordingAutoStop?
     private var autoStopMonitor: Task<Void, Never>?
     private var checkedRecovery = false
@@ -104,6 +168,7 @@ final class RecordingCoordinator: ObservableObject {
             let lock = try RecordingFileLock(root: root)
             defer { withExtendedLifetime(lock) {} }
             try await RecordingStorage.recover(store: store, root: root)
+            await finishMeetingDeletions()
             revision += 1
         } catch {
             self.error = "Could not check for interrupted recordings. \(error.localizedDescription)"
@@ -192,6 +257,7 @@ final class RecordingCoordinator: ObservableObject {
             let root = try await store.recordingRoot()
             let lock = try RecordingFileLock(root: root)
             try await RecordingStorage.recover(store: store, root: root)
+            await finishMeetingDeletions()
             revision += 1
             let scheduledEnd = try? await store.scheduledEnd(for: meetingID)
             let recording = Recording(id: UUID(), meetingID: meetingID, startedAt: Date(), endedAt: nil, state: .starting)
@@ -230,6 +296,7 @@ final class RecordingCoordinator: ObservableObject {
             }
             session = Session(recording: recording, capture: capture, storage: storage, consumer: consumer, lock: lock)
             state = .recording(meetingID)
+            scheduleScreenCaptures()
             revision += 1
             autoStopMonitor = Task { [weak self] in
                 while !Task.isCancelled {
@@ -258,10 +325,14 @@ final class RecordingCoordinator: ObservableObject {
 
     private func finish(cause: (any Error)? = nil) async {
         guard let session else { return }
+        screenCaptureTimer?.cancel()
+        screenCaptureTimer = nil
+        manualScreenCapture?.cancel()
         autoStopMonitor?.cancel()
         autoStopMonitor = nil
         autoStop = nil
         var failure = cause
+        var discarded = false
         do { try await session.capture.stop() }
         catch { failure = failure ?? error }
         if case .failure(let error) = await session.consumer.result { failure = failure ?? error }
@@ -270,7 +341,8 @@ final class RecordingCoordinator: ObservableObject {
         do {
             if failure != nil { try await session.storage.reconcile() }
             let saved = try await store.finalizeRecording(session.recording.id, endedAt: Date(), interrupted: failure != nil)
-            if !saved, failure == nil { failure = RecordingError.emptyRecording }
+            discarded = !saved
+            if discarded, failure == nil { failure = RecordingError.emptyRecording }
         } catch {
             failure = error
         }
@@ -282,5 +354,6 @@ final class RecordingCoordinator: ObservableObject {
         state = .idle
         await startMicrophoneMeterIfNeeded()
         transcription.checkpointPublished()
+        if discarded { await finishMeetingDeletions() }
     }
 }
