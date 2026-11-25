@@ -31,18 +31,18 @@ struct RenameSession {
 
 private enum MeetingAction {
     case navigate(Destination), openRecent(UUID), openModelSettings, create, rename(UUID, RenameOrigin)
-    case edit(UUID), delete(UUID), showCommandPalette
+    case edit(UUID), delete(UUID), showCommandPalette, recordNew
 }
 
 struct ContentView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var searchIndexRevision = 0
     @State private var homeRevision = 0
     @State private var recentMeetings: [Meeting]?
     @State private var homeError: String?
     @State private var recordedTime: TimeInterval?
     @State private var completedTranscriptions: Int?
     @State private var durationError: String?
-    @State private var savedDurations: [UUID: TimeInterval] = [:]
     @State private var destination: Destination = .home
     @State private var linkedMeetingID: UUID?
     @State private var linkError: String?
@@ -53,6 +53,7 @@ struct ContentView: View {
     @State private var deletionError: String?
     @State private var mutationError: String?
     @State private var pendingAction: MeetingAction?
+    @State private var recordAfterCreating = false
     @State private var creation: (id: UUID, name: String)?
     @State private var revealID: UUID?
     @State private var revealVersion = 0
@@ -65,6 +66,7 @@ struct ContentView: View {
     @State private var calendarFocusDate: Date?
     @State private var isCommandPalettePresented = false
     @State private var citedPassageID: String?
+    @State private var citationReplyID: UUID?
     @State private var citationNavigationRevision = 0
     private var store: MeetingStore { recording.store }
 
@@ -123,6 +125,7 @@ struct ContentView: View {
                 retry: { Task { await loadMeetings() } }
             )
             .frame(minWidth: 240, maxWidth: 440)
+            .background(SidebarSplitAutosave())
             .layoutPriority(-1)
             VStack(alignment: .leading, spacing: 20) {
                 if let meeting = selectedMeeting {
@@ -159,13 +162,16 @@ struct ContentView: View {
                                            calendarEventDate: meeting.calendarEventDate, calendarName: meeting.calendarName,
                                            transcription: transcription, revealLatest: revealLatestRecording,
                                            openSettings: { request(.openModelSettings) },
-                                           openCalendar: { date in calendarFocusDate = date; destination = .calendar })
+                                           openCalendar: { date in calendarFocusDate = date; destination = .calendar },
+                                           deleteRecording: recording.deleteRecording,
+                                           removeCalendarLink: { try await removeCalendarLink(from: meeting.id) })
                                     .id(meeting.id)
                             case .transcription:
                                 TranscriptionView(meetingID: meeting.id, store: store,
                                                   recordingRevision: recording.revision, transcription: transcription,
                                                   citedPassageID: citedPassageID,
-                                                  citedPassageRevision: citationNavigationRevision)
+                                                  citedPassageRevision: citationNavigationRevision,
+                                                  returnToChat: citationReplyID == nil ? nil : { request(.navigate(.chat)) })
                                     .id(meeting.id)
                             case .summary:
                                 MeetingSummaryView(meetingID: meeting.id, store: store,
@@ -196,7 +202,9 @@ struct ContentView: View {
                         .font(.largeTitle.bold())
                     if destination == .chat {
                         MeetingChatView(chat: recording.chat, meetings: meetings,
-                                        transcriptRevision: transcription.completionRevision, openCitation: openChatCitation)
+                                        openAISettings: { settingsSection = .ai; destination = .settings },
+                                        returnToMessage: citationReplyID,
+                                        openCitation: openChatCitation)
                     } else if destination == .settings {
                         SettingsView(section: $settingsSection, transcription: transcription, recording: recording,
                                      deleteAll: deleteAllMeetingData)
@@ -211,14 +219,20 @@ struct ContentView: View {
                                  recordedTime: recordedTime, completedTranscriptions: completedTranscriptions,
                                  durationError: durationError,
                                  open: { request(.openRecent($0)) },
-                                 retry: { homeRevision += 1 })
+                                 retry: { homeRevision += 1 }, canRecord: canCreate && recording.state == .idle,
+                                 record: { request(.recordNew) },
+                                 openCalendar: { date in
+                                     calendarFocusDate = date
+                                     request(.navigate(.calendar))
+                                 }, canCreateMeeting: canCreate,
+                                 createMeeting: createMeetingFromCalendar)
                             .task(id: homeLoadKey) { [key = homeLoadKey] in await loadHome(for: key) }
                     }
                     if destination != .chat { Spacer() }
                 }
                 if let cleanupError = recording.cleanupError {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Meeting files are pending deletion. \(cleanupError)")
+                        Text("Could not remove audio files. \(cleanupError)")
                             .foregroundStyle(.red)
                         Button("Retry File Cleanup") {
                             Task { await recording.finishMeetingDeletions() }
@@ -242,6 +256,12 @@ struct ContentView: View {
         }
         .task { await loadMeetings() }
         .task { await recording.recover() }
+        .task(id: transcription.completionRevision, priority: .utility) {
+            do {
+                try await MeetingChatRetrieval.refresh(store)
+                if !Task.isCancelled { searchIndexRevision &+= 1 }
+            } catch {}
+        }
         .task { await recording.finishMeetingDeletions() }
         .onOpenURL { url in
             linkedMeetingID = MeetingLink.meetingID(from: url)
@@ -289,9 +309,29 @@ struct ContentView: View {
         .sheet(item: $meetingEditor) { meeting in
             MeetingEditorView(meeting: meeting, store: store, onSave: merge)
         }
-        .sheet(isPresented: $isCommandPalettePresented) {
-            CommandPaletteView(meetings: meetings, store: store, commands: paletteCommands,
-                               activate: activatePaletteItem, startChat: startChatFromSearch)
+        .disabled(isCommandPalettePresented)
+        .accessibilityHidden(isCommandPalettePresented)
+        .overlay {
+            if isCommandPalettePresented {
+                ZStack(alignment: .top) {
+                    Color.black.opacity(0.18)
+                        .ignoresSafeArea()
+                        .onTapGesture { isCommandPalettePresented = false }
+                        .accessibilityHidden(true)
+
+                    CommandPaletteView(meetings: meetings, store: store, indexRevision: searchIndexRevision,
+                                       commands: paletteCommands, activate: activatePaletteItem,
+                                       startChat: startChatFromSearch, dismiss: { isCommandPalettePresented = false })
+                        .background {
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(Color(nsColor: .textBackgroundColor))
+                                .onTapGesture {}
+                        }
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .shadow(color: .black.opacity(0.2), radius: 16, y: 6)
+                        .padding(.top, 24)
+                }
+            }
         }
         .focusedSceneValue(\.openCommandPalette, { request(.showCommandPalette) })
     }
@@ -321,6 +361,12 @@ struct ContentView: View {
         switch item {
         case .meeting(let meeting): request(.navigate(.meeting(meeting.id)))
         case .tag(let tag): request(.navigate(.label(tag)))
+        case .transcript(let hit):
+            Task {
+                if !(await openPassage(hit.citation)) {
+                    linkError = "This transcript passage is no longer available."
+                }
+            }
         case .command(let command): command.run()
         }
     }
@@ -493,6 +539,7 @@ struct ContentView: View {
             guard !recording.isDeleting(id) else { return }
             meetingEditor = meetings.first { $0.id == id }
         case .create: createMeeting()
+        case .recordNew: createMeeting(recordImmediately: true)
         case .rename(let id, let origin):
             guard !recording.isDeleting(id),
                   let meeting = meetings.first(where: { $0.id == id }) else { return }
@@ -506,18 +553,24 @@ struct ContentView: View {
 
     private func openMeeting(_ id: UUID, revealLatest: Bool = false) {
         citedPassageID = nil
+        citationReplyID = nil
         revealLatestRecording = revealLatest
         activeTab = .transcription
         destination = .meeting(id)
     }
 
-    private func openChatCitation(_ citation: ChatCitation) async -> Bool {
+    private func openChatCitation(_ citation: ChatCitation, replyID: UUID) async -> Bool {
+        await openPassage(citation, replyID: replyID)
+    }
+
+    private func openPassage(_ citation: ChatCitation, replyID: UUID? = nil) async -> Bool {
         guard (try? await store.isChatCitationCurrent(citation)) == true,
               let passage = citation.passageIDs.first else { return false }
         revealLatestRecording = false
         activeTab = .transcription
         destination = .meeting(citation.meetingID)
         citedPassageID = passage
+        citationReplyID = replyID
         citationNavigationRevision &+= 1
         return true
     }
@@ -545,6 +598,13 @@ struct ContentView: View {
         }
     }
 
+    private func removeCalendarLink(from meetingID: UUID) async throws {
+        let updated = try await store.removeCalendarLink(from: meetingID)
+        recording.summaries.cancel(for: meetingID)
+        state = .loaded(meetings.map { $0.id == meetingID ? updated : $0 }.sorted(by: Meeting.mostRecentFirst))
+        homeRevision += 1
+    }
+
     private func deleteAllMeetingData() {
         Task {
             do {
@@ -568,9 +628,10 @@ struct ContentView: View {
         homeRevision += 1
     }
 
-    private func createMeeting() {
+    private func createMeeting(recordImmediately: Bool = false) {
         guard canCreate else { return }
         if creation == nil {
+            recordAfterCreating = recordImmediately
             let adjective = ["Quiet", "Bright", "Clear", "Fresh", "Calm", "Open"].randomElement()!
             let noun = ["River", "Meadow", "Forest", "Sky", "Ocean", "Summit"].randomElement()!
             creation = (UUID(), "\(adjective) \(noun)")
@@ -584,6 +645,8 @@ struct ContentView: View {
                 merge(meeting)
                 openMeeting(meeting.id)
                 self.creation = nil
+                if recordAfterCreating, recording.state == .idle { recording.toggle(for: meeting.id) }
+                recordAfterCreating = false
             } catch { mutationError = error.localizedDescription }
             isSaving = false
         }
@@ -647,29 +710,31 @@ struct ContentView: View {
         recentMeetings = summary.meetings
         completedTranscriptions = summary.completedTranscriptions
         homeError = nil
-        let savedIDs = Set(summary.savedRecordingIDs)
-        savedDurations = savedDurations.filter { savedIDs.contains($0.key) }
-
+        recordedTime = summary.recordedTime
+        durationError = nil
+        guard !summary.missingDurationIDs.isEmpty else { return }
         do {
             let root = try await store.recordingRoot()
-            var total: TimeInterval = 0
-            for id in summary.savedRecordingIDs {
-                if let duration = savedDurations[id] {
+            var total = summary.recordedTime
+            for id in summary.missingDurationIDs {
+                try Task.checkCancellation()
+                let segments = try await store.audioSegments(for: id)
+                do {
+                    let duration = segments.isEmpty ? 0 : try await RecordingPlayback.savedDuration(segments: segments, root: root)
+                    try Task.checkCancellation()
+                    try await store.saveRecordingDuration(duration, for: id)
                     total += duration
-                } else {
-                    let segments = try await store.audioSegments(for: id)
-                    let duration = try await RecordingPlayback.savedDuration(segments: segments, root: root)
+                } catch is CancellationError {
+                    return
+                } catch {
                     guard !Task.isCancelled, key == homeLoadKey else { return }
-                    savedDurations[id] = duration
-                    total += duration
+                    durationError = "Some saved audio is unavailable. The total excludes those recordings."
                 }
             }
             guard !Task.isCancelled, key == homeLoadKey else { return }
             recordedTime = total
-            durationError = nil
         } catch {
             guard !Task.isCancelled, key == homeLoadKey else { return }
-            recordedTime = nil
             durationError = error.localizedDescription
         }
     }

@@ -1,6 +1,6 @@
 import SwiftUI
 
-struct ChatMarkdownView: View {
+struct ChatMarkdownView: View, Equatable {
     let markdown: String
 
     private enum Block {

@@ -48,23 +48,66 @@ actor RecordingStorage {
         self.checkpointPublished = checkpointPublished
     }
 
-    static func finishMeetingDeletions(store: MeetingStore) async throws {
-        guard try await !store.pendingMeetingDeletions().isEmpty else { return }
+    @discardableResult
+    static func finishMeetingDeletions(store: MeetingStore) async throws -> Bool {
+        if try await store.pendingMeetingDeletions().isEmpty,
+           try await store.pendingRecordingDeletions().isEmpty { return false }
         let root = try await store.recordingRoot()
         let lock = try RecordingFileLock(root: root.appendingPathComponent(".deletions", isDirectory: true))
         defer { withExtendedLifetime(lock) {} }
+        let meetings = try await store.pendingMeetingDeletions()
+        let recordings = try await store.pendingRecordingDeletions()
         var firstError: (any Error)?
-        for id in try await store.pendingMeetingDeletions() {
+        for id in meetings {
             do {
-                let directory = root.appendingPathComponent(id.uuidString, isDirectory: true)
-                do { try FileManager.default.removeItem(at: directory) }
-                catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile {}
+                try removeAudioDirectory(root.appendingPathComponent(id.uuidString, isDirectory: true))
                 try await store.finishMeetingDeletion(id)
             } catch {
                 if firstError == nil { firstError = error }
             }
         }
+        for removal in recordings {
+            do {
+                let directory = root.appendingPathComponent(removal.meetingID.uuidString, isDirectory: true)
+                    .appendingPathComponent(removal.recordingID.uuidString, isDirectory: true)
+                try removeAudioDirectory(directory)
+                try await store.finishRecordingDeletion(removal.recordingID)
+            } catch {
+                if firstError == nil { firstError = error }
+            }
+        }
         if let firstError { throw firstError }
+        return !meetings.isEmpty || !recordings.isEmpty
+    }
+
+    private static func removeAudioDirectory(_ directory: URL) throws {
+        do { try FileManager.default.removeItem(at: directory) }
+        catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile {}
+    }
+
+    static func bytesUsed(at root: URL) async throws -> Int64 {
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .totalFileAllocatedSizeKey, .fileAllocatedSizeKey]
+        var enumerationError: (any Error)?
+        let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: Array(keys),
+                                                   options: .skipsHiddenFiles) { _, error in
+            let code = (error as? CocoaError)?.code
+            if code == .fileReadNoSuchFile || code == .fileNoSuchFile { return true }
+            enumerationError = error
+            return false
+        }
+        var bytes: Int64 = 0
+        while let url = files?.nextObject() as? URL {
+            try Task.checkCancellation()
+            guard url.pathExtension == "caf" else { continue }
+            do {
+                let values = try url.resourceValues(forKeys: keys)
+                if values.isRegularFile == true {
+                    bytes += Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? 0)
+                }
+            } catch let error as CocoaError where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile {}
+        }
+        if let enumerationError { throw enumerationError }
+        return bytes
     }
 
     static func recover(store: MeetingStore, root: URL) async throws {
@@ -141,8 +184,11 @@ actor RecordingStorage {
                 if stem.hasSuffix(".partial") {
                     try? FileManager.default.removeItem(at: url)
                 } else if let start = Int64(stem), start >= 0 {
-                    let frames = try AVAudioFile(forReading: url).length
-                    if frames > 0 { try await register(url, source: source, start: start, frames: frames) }
+                    let file = try AVAudioFile(forReading: url)
+                    if file.length > 0 {
+                        try await register(url, source: source, start: start, frames: file.length,
+                                           sampleRate: file.processingFormat.sampleRate)
+                    }
                 }
             }
         }
@@ -166,6 +212,7 @@ actor RecordingStorage {
 
     private func publish(_ source: AudioSegment.Source) async throws {
         guard var checkpoint = checkpoints.removeValue(forKey: source) else { return }
+        let sampleRate = checkpoint.file?.processingFormat.sampleRate ?? 0
         checkpoint.file = nil
         guard checkpoint.frames > 0 else {
             try FileManager.default.removeItem(at: checkpoint.temporary)
@@ -175,14 +222,14 @@ actor RecordingStorage {
         try file.synchronize()
         try file.close()
         try FileManager.default.moveItem(at: checkpoint.temporary, to: checkpoint.destination)
-        try await register(checkpoint.destination, source: source, start: checkpoint.start, frames: checkpoint.frames)
+        try await register(checkpoint.destination, source: source, start: checkpoint.start, frames: checkpoint.frames, sampleRate: sampleRate)
     }
 
-    private func register(_ url: URL, source: AudioSegment.Source, start: Int64, frames: Int64) async throws {
+    private func register(_ url: URL, source: AudioSegment.Source, start: Int64, frames: Int64, sampleRate: Double) async throws {
         let relativePath = [recording.meetingID.uuidString, recording.id.uuidString, source.rawValue, url.lastPathComponent]
             .joined(separator: "/")
         try await store.registerSegment(AudioSegment(recordingID: recording.id, source: source,
-            startOffset: start, frameCount: frames, relativePath: relativePath))
+            startOffset: start, frameCount: frames, relativePath: relativePath), duration: Double(frames) / sampleRate)
         checkpointPublished()
     }
 

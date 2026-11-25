@@ -1,21 +1,25 @@
 import Combine
 import Foundation
+import OSLog
 
 @MainActor
 final class MeetingChatCoordinator: ObservableObject {
+    @Published var draft = ""
+    @Published private(set) var activity: ChatActivity = .preparing
     @Published private(set) var current: ChatConversation
     @Published private(set) var unavailableReason: String?
     @Published private(set) var error: String?
     @Published private(set) var ready = false
-    private var indexAvailable = false
+    private(set) var indexAvailable = false
     private var savedHistory: [ChatConversation] = []
     private let store: MeetingStore
     private let local: ChatProducer
     private var active: Task<Void, Never>?
     private var pendingWrite: Task<Void, Never>?
-    private var pendingQuestion: String?
+    private var sendSearchDraft = false
     private var pendingNewChat = false
     private let clock = ContinuousClock()
+    private let performance = Logger(subsystem: "com.meetingrecord.app", category: "ChatPerformance")
 
     init(store: MeetingStore) {
         self.store = store
@@ -26,26 +30,23 @@ final class MeetingChatCoordinator: ObservableObject {
     var history: [ChatConversation] { savedHistory }
     var isStreaming: Bool { current.messages.last?.status.isActive == true }
     var configurationMessage: String? {
-        guard indexAvailable else { return "Transcript search requires SQLite FTS5." }
-        let model = SummaryModel(rawValue: UserDefaults.standard.string(forKey: "selectedMeetingChatModel") ?? "") ?? .appleIntelligence
-        if model.usesOpenAI { return (try? OpenAIChatKey.load()) == nil ? "Add an OpenAI API key in Settings → Chat." : nil }
+        guard indexAvailable else { return unavailableReason }
+        let model = AISettings.model(for: .chat)
+        if model.usesOpenAI { return !OpenAIKey.hasConfiguredKey ? "Add an OpenAI API key in Settings → AI." : nil }
         return unavailableReason
     }
-    var canSend: Bool { ready && configurationMessage == nil && !isStreaming }
+    var canSend: Bool { ready && indexAvailable && configurationMessage == nil && !isStreaming }
 
     func activate() async {
         guard !ready else { return }
         do {
             let chats = try await store.loadChatHistory(recovering: true)
-            let selected = SummaryModel(rawValue: UserDefaults.standard.string(forKey: "selectedMeetingChatModel") ?? "") ?? .appleIntelligence
-            let availability = selected.usesOpenAI ? nil : OnDeviceMeetingChat.availabilityMessage()
+            let availability = OnDeviceMeetingChat.availabilityMessage()
             indexAvailable = try await store.chatIndexAvailable()
             try Task.checkCancellation()
             savedHistory = chats
             unavailableReason = !indexAvailable ? "Transcript search requires SQLite FTS5." : availability
-            if !pendingNewChat {
-                current = pendingQuestion == nil ? (chats.first ?? ChatConversation()) : ChatConversation(scope: nil)
-            }
+            if !pendingNewChat { current = chats.first ?? ChatConversation() }
             pendingNewChat = false
         } catch is CancellationError {
             return
@@ -57,34 +58,24 @@ final class MeetingChatCoordinator: ObservableObject {
     }
 
     func startChat(with question: String) {
-        stop()
-        current = ChatConversation(scope: nil)
-        pendingNewChat = true
-        error = nil
-        pendingQuestion = question
+        resetChat(scope: nil)
+        draft = question
+        sendSearchDraft = true
         resumePendingChat()
     }
 
-    func resumePendingChat() {
-        guard ready, let question = pendingQuestion else { return }
-        guard canSend else {
-            error = configurationMessage
-            return
-        }
-        pendingQuestion = nil
-        send(question)
+    private func resumePendingChat() {
+        guard ready, sendSearchDraft else { return }
+        sendSearchDraft = false
+        if canSend { submitDraft() }
     }
 
     func startNewChat(for meetingID: UUID) {
-        stop()
-        pendingQuestion = nil
-        pendingNewChat = true
-        current = ChatConversation(scope: meetingID)
-        error = nil
+        resetChat(scope: meetingID)
     }
 
     func watchModelReadiness() async {
-        guard SummaryModel(rawValue: UserDefaults.standard.string(forKey: "selectedMeetingChatModel") ?? "")?.usesOpenAI != true else { return }
+        guard !AISettings.model(for: .chat).usesOpenAI else { return }
         var latest = MeetingSummarizer.availability()
         await MeetingSummarizer.watchAvailability { [weak self] status in
             latest = status
@@ -99,15 +90,14 @@ final class MeetingChatCoordinator: ObservableObject {
         }
     }
 
-    func refreshIndex() async {
-        do { try await MeetingChatRetrieval.refresh(store) }
-        catch is CancellationError {}
-        catch { self.error = "Could not index transcripts. \(error.localizedDescription)" }
-    }
+    func newChat() { resetChat(scope: current.scope) }
 
-    func newChat() {
+    private func resetChat(scope: UUID?) {
         stop()
-        current = ChatConversation(scope: current.scope)
+        draft = ""
+        sendSearchDraft = false
+        pendingNewChat = !ready
+        current = ChatConversation(scope: scope)
         error = nil
     }
 
@@ -115,6 +105,8 @@ final class MeetingChatCoordinator: ObservableObject {
         guard id != current.id, history.contains(where: { $0.id == id }) else { return }
         stop()
         guard let thread = history.first(where: { $0.id == id }) else { return }
+        draft = ""
+        sendSearchDraft = false
         current = thread
         error = nil
     }
@@ -126,52 +118,107 @@ final class MeetingChatCoordinator: ObservableObject {
         if !current.messages.isEmpty { publish() }
     }
 
-    func send(_ input: String) {
-        let question = input.trimmingCharacters(in: .whitespacesAndNewlines)
+    func submitDraft(thinkLonger: Bool = false) {
+        let question = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty, canSend else { return }
+        draft = ""
+        send(question, thinkLonger: thinkLonger, retry: false)
+    }
+
+    func canRetry(_ message: ChatMessage) -> Bool {
+        canSend && current.messages.last?.id == message.id &&
+            [.failed, .interrupted, .stopped].contains(message.status)
+    }
+
+    func retry(_ message: ChatMessage, thinkLonger: Bool) {
+        guard canRetry(message), let question = current.messages.dropLast().last, question.role == .user else { return }
+        send(question.body, thinkLonger: thinkLonger, retry: true)
+    }
+
+    private func send(_ question: String, thinkLonger: Bool, retry: Bool) {
         let thread = current.id
         let requestID = UUID()
         let isNew = current.messages.isEmpty
         let scope = current.scope
-        let prior = current.messages.filter { message in
+        let prior = current.messages.dropLast(retry ? 2 : 0).filter { message in
             guard message.status == .complete else { return false }
             return scope == nil || message.sourceIDs.allSatisfy { $0 == scope }
         }.suffix(6)
-        let request = ChatRequest(question: question, scope: scope, priorMessages: Array(prior))
+        let request = ChatRequest(question: question, scope: scope, priorMessages: Array(prior), thinkLonger: thinkLonger)
         if isNew { current.title = String(question.prefix(55)) }
         error = nil
-        current.messages.append(ChatMessage(role: .user, body: question, status: .complete))
-        current.messages.append(ChatMessage(role: .assistant, status: .pending, requestID: requestID))
-        publish(changed: 2, create: isNew)
+        activity = .preparing
+        if retry, let previous = current.messages.last {
+            current.messages[current.messages.count - 1] = ChatMessage(id: previous.id, role: .assistant,
+                status: .pending, requestID: requestID)
+        } else {
+            current.messages.append(ChatMessage(role: .user, body: question, status: .complete))
+            current.messages.append(ChatMessage(role: .assistant, status: .pending, requestID: requestID))
+        }
+        publish(changed: retry ? 1 : 2, create: isNew, retrying: retry)
 
-        let selectedModel = SummaryModel(rawValue: UserDefaults.standard.string(forKey: "selectedMeetingChatModel") ?? "") ?? .appleIntelligence
-        let producer = selectedModel.usesOpenAI ? OpenAIChat.producer(store: store) : local
+        let producer = AISettings.model(for: .chat).usesOpenAI ? OpenAIChat.producer(store: store) : local
+        let started = clock.now
         active = Task {
-            var lastSave = clock.now
+            var lastSave = started
+            var loggedFirstText = false
+            var lastRender: ContinuousClock.Instant?
+            var buffered: ChatUpdate?
+            var sources = Set<UUID>()
             do {
                 for try await update in producer(request) {
                     try Task.checkCancellation()
                     guard current.id == thread, current.messages.last?.requestID == requestID, isStreaming else { return }
-                    let index = current.messages.count - 1
-                    current.messages[index].body = update.text
-                    current.messages[index].status = .streaming
-                    current.messages[index].citations = update.citations
-                    current.messages[index].sourceIDs.formUnion(update.sourceIDs)
-                    if lastSave.duration(to: clock.now) >= .milliseconds(750) {
+                    sources.formUnion(update.sourceIDs)
+                    if let phase = update.activity {
+                        activity = phase
+                        if !update.sourceIDs.isEmpty {
+                            current.messages[current.messages.count - 1].sourceIDs.formUnion(update.sourceIDs)
+                        }
+                        continue
+                    }
+                    buffered = update
+                    let now = clock.now
+                    if !loggedFirstText, !update.text.isEmpty {
+                        let elapsed = started.duration(to: now).components
+                        let milliseconds = Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15
+                        performance.debug("First chat text after \(milliseconds, format: .fixed(precision: 1), privacy: .public) ms")
+                        loggedFirstText = true
+                    }
+                    if lastRender.map({ $0.duration(to: now) >= .milliseconds(45) }) ?? true {
+                        apply(update, sources: sources)
+                        buffered = nil
+                        lastRender = now
+                    }
+                    if lastSave.duration(to: now) >= .milliseconds(750) {
                         publish(changed: 1)
-                        lastSave = clock.now
+                        lastSave = now
                     }
                 }
-                guard !Task.isCancelled, current.id == thread, current.messages.last?.requestID == requestID else { return }
+                try Task.checkCancellation()
+                guard current.id == thread, current.messages.last?.requestID == requestID else { return }
+                if let buffered { apply(buffered, sources: sources) }
                 finish(.complete)
             } catch is CancellationError {
                 return
             } catch {
                 guard !Task.isCancelled, current.id == thread, current.messages.last?.requestID == requestID else { return }
+                if let buffered { apply(buffered, sources: sources) }
                 self.error = error.localizedDescription
                 finish(.failed)
             }
         }
+    }
+
+    private func apply(_ update: ChatUpdate, sources: Set<UUID>) {
+        let index = current.messages.count - 1
+        var message = current.messages[index]
+        message.body = update.text
+        message.status = .streaming
+        message.citations = update.citations
+        message.sourceIDs.formUnion(sources)
+        current.messages[index] = message
+        activity = .writing
     }
 
     func stop() {
@@ -188,10 +235,18 @@ final class MeetingChatCoordinator: ObservableObject {
     }
 
     func meetingsDeleted(_ ids: Set<UUID>) {
+        removeMessages { !$0.sourceIDs.isDisjoint(with: ids) }
+    }
+
+    func recordingDeleted(_ id: UUID) {
+        removeMessages { $0.citations.contains { $0.recordingID == id } }
+    }
+
+    private func removeMessages(where hasRemovedSource: (ChatMessage) -> Bool) {
         stop()
         for thread in savedHistory.indices {
             for index in savedHistory[thread].messages.indices
-            where !savedHistory[thread].messages[index].sourceIDs.isDisjoint(with: ids) {
+            where hasRemovedSource(savedHistory[thread].messages[index]) {
                 var message = savedHistory[thread].messages[index]
                 message.body = ""
                 message.status = .sourceRemoved
@@ -210,12 +265,12 @@ final class MeetingChatCoordinator: ObservableObject {
         publish(changed: 1)
     }
 
-    private func publish(changed: Int = 0, create: Bool = false) {
+    private func publish(changed: Int = 0, create: Bool = false, retrying: Bool = false) {
         current.updatedAt = .now
         savedHistory.removeAll { $0.id == current.id }
         savedHistory.insert(current, at: 0)
         let thread = current
-        enqueue { try await $0.saveChat(thread, changed: changed, create: create) }
+        enqueue { try await $0.saveChat(thread, changed: changed, create: create, retrying: retrying) }
     }
 
     private func enqueue(_ write: @escaping @Sendable (MeetingStore) async throws -> Void) {

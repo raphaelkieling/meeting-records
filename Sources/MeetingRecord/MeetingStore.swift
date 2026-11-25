@@ -29,7 +29,9 @@ actor MeetingStore {
 
     struct HomeSummary: Sendable {
         let meetings: [Meeting]
-        let savedRecordingIDs: [UUID]
+        let savedRecordingCount: Int
+        let recordedTime: TimeInterval
+        let missingDurationIDs: [UUID]
         let completedTranscriptions: Int
     }
 
@@ -38,26 +40,23 @@ actor MeetingStore {
             try transaction(db: db, readOnly: true) {
                 let meetings = try readMeetings(db: db, recentOnly: true)
                 let statement = try prepare("""
-                    SELECT r.id, j.status = 'Complete'
+                    SELECT count(*), coalesce(sum(r.duration), 0), coalesce(sum(j.status = 'Complete'), 0)
                     FROM recordings r LEFT JOIN transcript_jobs j ON j.inputID = r.id
                     WHERE r.endedAt IS NOT NULL
-                    ORDER BY r.startedAt, r.id
                     """, db: db)
                 defer { sqlite3_finalize(statement) }
-                var ids: [UUID] = []
-                var completed = 0
-                while true {
-                    let result = sqlite3_step(statement)
-                    if result == SQLITE_DONE {
-                        return HomeSummary(meetings: meetings, savedRecordingIDs: ids,
-                                           completedTranscriptions: completed)
+                let result = sqlite3_step(statement)
+                guard result == SQLITE_ROW else { throw MeetingStoreError.sqlite(result) }
+                let missing = try chatRows("""
+                    SELECT id FROM recordings WHERE endedAt IS NOT NULL AND duration IS NULL ORDER BY startedAt, id
+                    """, [], db: db) { row in
+                        guard let id = text(row, column: 0).flatMap(UUID.init(uuidString:))
+                        else { throw MeetingStoreError.invalidRecord }
+                        return id
                     }
-                    guard result == SQLITE_ROW else { throw MeetingStoreError.sqlite(result) }
-                    guard let id = text(statement, column: 0).flatMap(UUID.init(uuidString:))
-                    else { throw MeetingStoreError.invalidRecord }
-                    ids.append(id)
-                    completed += Int(sqlite3_column_int(statement, 1))
-                }
+                return HomeSummary(meetings: meetings, savedRecordingCount: Int(sqlite3_column_int64(statement, 0)),
+                                   recordedTime: sqlite3_column_double(statement, 1), missingDurationIDs: missing,
+                                   completedTranscriptions: Int(sqlite3_column_int64(statement, 2)))
             }
         }
     }
@@ -304,6 +303,38 @@ actor MeetingStore {
         return url.deletingLastPathComponent().appendingPathComponent("Recordings", isDirectory: true)
     }
 
+    func removeCalendarLink(from meetingID: UUID) throws -> Meeting {
+        try withDatabase { db in
+            try transaction(db: db) {
+                let meetings = try readMeetings(db: db)
+                guard let meeting = meetings.first(where: { $0.id == meetingID }) else { throw MeetingStoreError.notFound }
+                try execute("DELETE FROM calendar_meeting_inputs WHERE upper(meetingID) = ?", id: meetingID, db: db)
+                guard sqlite3_changes(db) == 1 else { return meeting }
+                let updatedAt = try nextUpdate(after: meetings)
+                let statement = try prepare("UPDATE meetings SET updatedAt = ? WHERE upper(id) = ?", db: db)
+                defer { sqlite3_finalize(statement) }
+                try check(sqlite3_bind_double(statement, 1, updatedAt.timeIntervalSince1970))
+                try bind(meetingID.uuidString, at: 2, to: statement)
+                try finish(statement)
+                return try Meeting(id: meetingID, name: meeting.name, description: meeting.description,
+                                   tags: meeting.tags, createdAt: meeting.createdAt, updatedAt: updatedAt)
+            }
+        }
+    }
+
+    func scheduledEnd(for meetingID: UUID) throws -> Date? {
+        try withDatabase { db in
+            let statement = try prepare("SELECT details FROM calendar_meeting_inputs WHERE meetingID = ?", db: db)
+            defer { sqlite3_finalize(statement) }
+            try bind(meetingID.uuidString, at: 1, to: statement)
+            let result = sqlite3_step(statement)
+            if result == SQLITE_DONE { return nil }
+            guard result == SQLITE_ROW else { throw MeetingStoreError.sqlite(result) }
+            guard let details = text(statement, column: 0) else { return nil }
+            return try JSONDecoder().decode(CalendarEventDetails.self, from: Data(details.utf8)).endDate
+        }
+    }
+
     private func withDatabase<T>(_ operation: (OpaquePointer) throws -> T) throws -> T {
         let url = try databaseURL ?? Self.defaultDatabaseURL()
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -323,15 +354,15 @@ actor MeetingStore {
         let version = sqlite3_column_int(statement, 0)
         sqlite3_finalize(statement)
         guard step == SQLITE_ROW else { throw MeetingStoreError.sqlite(step) }
-        guard (0...10).contains(version) else { throw MeetingStoreError.incompatibleVersion }
+        guard (0...12).contains(version) else { throw MeetingStoreError.incompatibleVersion }
         return version
     }
 
     private func ensureSchema(db: OpaquePointer) throws {
-        guard try schemaVersion(db: db) < 10 else { return }
+        guard try schemaVersion(db: db) < 12 else { return }
         try transaction(db: db) {
             let version = try schemaVersion(db: db)
-            guard version < 10 else { return }
+            guard version < 12 else { return }
             if version < 3 {
                 if version == 0 {
                     try execute("""
@@ -418,6 +449,24 @@ actor MeetingStore {
                     """, db: db)
             }
             if version < 10 { try createChatTables(db) }
+            if version < 11 {
+                try execute("""
+                    ALTER TABLE audio_segments ADD COLUMN duration REAL CHECK(duration > 0);
+                    ALTER TABLE recordings ADD COLUMN duration REAL CHECK(duration >= 0);
+                    CREATE INDEX recording_missing_duration ON recordings(startedAt, id)
+                    WHERE endedAt IS NOT NULL AND duration IS NULL;
+                    PRAGMA user_version = 11;
+                    """, db: db)
+            }
+            if version < 12 {
+                try execute("""
+                    CREATE TABLE pending_recording_deletions (
+                        recordingID TEXT PRIMARY KEY NOT NULL,
+                        meetingID TEXT NOT NULL
+                    );
+                    PRAGMA user_version = 12;
+                    """, db: db)
+            }
         }
     }
 
@@ -575,11 +624,12 @@ extension MeetingStore {
         }
     }
 
-    func registerSegment(_ segment: AudioSegment) throws {
+    func registerSegment(_ segment: AudioSegment, duration: TimeInterval? = nil) throws {
         try withDatabase { db in
             let statement = try prepare("""
-                INSERT INTO audio_segments (recordingID, source, startOffset, frameCount, relativePath)
-                VALUES (?, ?, ?, ?, ?) ON CONFLICT(recordingID, source, startOffset) DO NOTHING
+                INSERT INTO audio_segments (recordingID, source, startOffset, frameCount, relativePath, duration)
+                VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(recordingID, source, startOffset) DO UPDATE SET duration = excluded.duration
+                WHERE audio_segments.duration IS NULL AND excluded.duration IS NOT NULL
                 """, db: db)
             defer { sqlite3_finalize(statement) }
             try bind(segment.recordingID.uuidString, at: 1, to: statement)
@@ -587,6 +637,9 @@ extension MeetingStore {
             try check(sqlite3_bind_int64(statement, 3, segment.startOffset))
             try check(sqlite3_bind_int64(statement, 4, segment.frameCount))
             try bind(segment.relativePath, at: 5, to: statement)
+            if let duration, duration.isFinite, duration > 0 {
+                try check(sqlite3_bind_double(statement, 6, duration))
+            }
             try finish(statement)
         }
     }
@@ -620,7 +673,10 @@ extension MeetingStore {
         try withDatabase { db in
             try transaction(db: db) {
                 let update = try prepare("""
-                    UPDATE recordings SET state = ?, endedAt = max(startedAt, ?)
+                    UPDATE recordings SET state = ?, endedAt = max(startedAt, ?), duration = (
+                        SELECT CASE WHEN count(duration) = count(*) THEN max(startOffset / 1e9 + duration) END
+                        FROM audio_segments WHERE recordingID = recordings.id
+                    )
                     WHERE id = ? AND state IN ('starting', 'recording')
                     AND EXISTS (SELECT 1 FROM audio_segments WHERE recordingID = recordings.id)
                     """, db: db)
@@ -637,6 +693,58 @@ extension MeetingStore {
                 try finish(remove)
                 return false
             }
+        }
+    }
+
+    func deleteRecording(_ recording: Recording) throws {
+        try withDatabase { db in
+            try transaction(db: db) {
+                try chatWrite("""
+                    INSERT INTO pending_recording_deletions (recordingID, meetingID)
+                    SELECT id, meetingID FROM recordings
+                    WHERE upper(id) = ? AND upper(meetingID) = ? AND endedAt IS NOT NULL
+                    """, [recording.id.uuidString, recording.meetingID.uuidString], db: db)
+                guard sqlite3_changes(db) == 1 else {
+                    if try exists("SELECT 1 FROM recordings WHERE upper(id) = ? AND endedAt IS NULL",
+                                  id: recording.id, db: db) { throw MeetingStoreError.meetingRecording }
+                    throw MeetingStoreError.notFound
+                }
+                try removeChatRecordingData(recording.id, db: db)
+                try execute("DELETE FROM recordings WHERE upper(id) = ?", id: recording.id, db: db)
+            }
+        }
+    }
+
+    struct PendingRecordingDeletion: Sendable {
+        let recordingID: UUID
+        let meetingID: UUID
+    }
+
+    func pendingRecordingDeletions() throws -> [PendingRecordingDeletion] {
+        try withDatabase { db in
+            try chatRows("SELECT recordingID, meetingID FROM pending_recording_deletions", db: db) { row in
+                guard let recordingID = text(row, column: 0).flatMap(UUID.init(uuidString:)),
+                      let meetingID = text(row, column: 1).flatMap(UUID.init(uuidString:))
+                else { throw MeetingStoreError.invalidRecord }
+                return PendingRecordingDeletion(recordingID: recordingID, meetingID: meetingID)
+            }
+        }
+    }
+
+    func finishRecordingDeletion(_ id: UUID) throws {
+        try withDatabase { db in
+            try execute("DELETE FROM pending_recording_deletions WHERE upper(recordingID) = ?", id: id, db: db)
+        }
+    }
+
+    func saveRecordingDuration(_ duration: TimeInterval, for id: UUID) throws {
+        guard duration.isFinite, duration >= 0 else { throw MeetingStoreError.invalidRecord }
+        try withDatabase { db in
+            let statement = try prepare("UPDATE recordings SET duration = ? WHERE id = ? AND endedAt IS NOT NULL AND duration IS NULL", db: db)
+            defer { sqlite3_finalize(statement) }
+            try check(sqlite3_bind_double(statement, 1, duration))
+            try bind(id.uuidString, at: 2, to: statement)
+            try finish(statement)
         }
     }
 
@@ -1213,7 +1321,7 @@ extension MeetingStore {
         }
     }
 
-    func saveChat(_ thread: ChatConversation, changed: Int, create: Bool) throws {
+    func saveChat(_ thread: ChatConversation, changed: Int, create: Bool, retrying: Bool = false) throws {
         try withDatabase { db in
             try transaction(db: db) {
                 let threadID = thread.id.uuidString
@@ -1227,24 +1335,32 @@ extension MeetingStore {
                 for (ordinal, value) in thread.messages.enumerated().suffix(changed) {
                     var message = value
                     let sources = message.sourceIDs.union(message.citations.map(\.meetingID))
-                    for id in sources where try !exists("SELECT 1 FROM meetings WHERE upper(id) = ?", id: id, db: db) {
+                    let missingMeeting = try sources.contains { id in
+                        try !exists("SELECT 1 FROM meetings WHERE upper(id) = ?", id: id, db: db)
+                    }
+                    let missingRecording = try message.citations.contains { citation in
+                        try !exists("SELECT 1 FROM recordings WHERE upper(id) = ?", id: citation.recordingID, db: db)
+                    }
+                    if missingMeeting || missingRecording {
                         message.status = .sourceRemoved
                         message.body = ""
                         message.citations = []
-                        break
                     }
                     try chatWrite("""
                         INSERT INTO chat_messages(id, conversationID, ordinal, role, body, status, requestID, citations)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(id) DO UPDATE SET body = excluded.body, status = excluded.status, citations = excluded.citations
-                        WHERE chat_messages.status IN ('pending', 'streaming') AND chat_messages.requestID = excluded.requestID
+                        ON CONFLICT(id) DO UPDATE SET body = excluded.body, status = excluded.status,
+                            citations = excluded.citations, requestID = excluded.requestID
+                        WHERE (chat_messages.status IN ('pending', 'streaming') AND chat_messages.requestID = excluded.requestID)
+                           OR (CAST(? AS INTEGER) = 1 AND chat_messages.status IN ('failed', 'interrupted', 'stopped'))
                         """, [message.id.uuidString, threadID, String(ordinal), message.role.rawValue,
                               message.body, message.status.rawValue, message.requestID?.uuidString,
-                              try chatJSON(message.citations)], db: db)
+                              try chatJSON(message.citations), retrying ? "1" : "0"], db: db)
                     guard sqlite3_changes(db) == 1 else { continue }
-                    if message.status == .sourceRemoved {
+                    if retrying || message.status == .sourceRemoved {
                         try execute("DELETE FROM chat_sources WHERE messageID = ?", id: message.id, db: db)
-                    } else {
+                    }
+                    if message.status != .sourceRemoved {
                         for id in sources {
                             try chatWrite("INSERT OR IGNORE INTO chat_sources VALUES (?, ?)",
                                           [message.id.uuidString, id.uuidString], db: db)
@@ -1257,6 +1373,24 @@ extension MeetingStore {
 
     func deleteChat(_ id: UUID) throws {
         try withDatabase { try execute("DELETE FROM chat_conversations WHERE id = ?", id: id, db: $0) }
+    }
+
+    private func removeChatRecordingData(_ id: UUID, db: OpaquePointer) throws {
+        try execute("""
+            UPDATE chat_messages SET body = '', status = 'sourceRemoved', citations = '[]'
+            WHERE EXISTS (
+                SELECT 1 FROM json_each(chat_messages.citations) citation
+                WHERE upper(json_extract(citation.value, '$.recordingID')) = ?
+            )
+            """, id: id, db: db)
+        try execute("""
+            DELETE FROM chat_sources WHERE messageID IN (SELECT id FROM chat_messages WHERE status = 'sourceRemoved')
+            """, db: db)
+        if sqlite3_compileoption_used("ENABLE_FTS5") != 0,
+           !(try chatRows("SELECT 1 FROM sqlite_master WHERE name = 'chat_fts'", db: db) { _ in true }).isEmpty {
+            try execute("DELETE FROM chat_fts WHERE rowid IN (SELECT id FROM chat_chunks WHERE upper(recordingID) = ?)",
+                        id: id, db: db)
+        }
     }
 
     private func removeChatMeetingData(_ id: UUID, db: OpaquePointer) throws {
@@ -1385,7 +1519,11 @@ extension MeetingStore {
 
     func chatEvidence(terms: [String], scope: UUID?, candidates: [UUID] = [],
                       from: Date? = nil, until: Date? = nil) throws -> [ChatEvidence] {
-        let match = MeetingChatRetrieval.match(terms)
+        try readChatEvidence(match: MeetingChatRetrieval.match(terms), scope: scope, candidates: candidates, from: from, until: until)
+    }
+
+    private func readChatEvidence(match: String, scope: UUID?, candidates: [UUID] = [],
+                                  from: Date? = nil, until: Date? = nil) throws -> [ChatEvidence] {
         guard !match.isEmpty, try chatIndexAvailable() else { return [] }
         let candidates = Array(candidates.prefix(12))
         let candidateFilter = candidates.isEmpty ? "" :
@@ -1418,41 +1556,96 @@ extension MeetingStore {
         }
     }
 
+    func findTranscriptPassages(_ query: String) throws -> [ChatEvidence] {
+        let terms = query.split { !$0.isLetter && !$0.isNumber }.prefix(8).map(String.init)
+        let match = terms.map { "\"\($0)\"*" }.joined(separator: " AND ")
+        let chunks = try readChatEvidence(match: match, scope: nil)
+        guard !chunks.isEmpty else { return [] }
+        return try withDatabase { db in
+            var seen = Set<String>()
+            return try chunks.compactMap { chunk in
+                let original = chunk.citation
+                let identifiers = original.passageIDs
+                let placeholders = Array(repeating: "?", count: identifiers.count).joined(separator: ",")
+                let passages = try chatRows("""
+                    SELECT upper(inputID) || ':' || source || ':' || checkpoint || ':' || sequence, startOffset, text
+                    FROM transcript_segments
+                    WHERE inputID = ? AND upper(inputID) || ':' || source || ':' || checkpoint || ':' || sequence IN (\(placeholders))
+                    ORDER BY startOffset, source, checkpoint, sequence
+                    """, [original.recordingID.uuidString] + identifiers, db: db) { row in
+                        (id: text(row, column: 0) ?? "", offset: sqlite3_column_int64(row, 1),
+                         body: text(row, column: 2) ?? "")
+                    }
+                let passage = passages.first { $0.body.localizedStandardContains(query) } ??
+                    passages.max { lhs, rhs in
+                        terms.filter { lhs.body.localizedStandardContains($0) }.count <
+                            terms.filter { rhs.body.localizedStandardContains($0) }.count
+                    }
+                guard let passage, seen.insert(passage.id).inserted else { return nil }
+                let citation = ChatCitation(meetingID: original.meetingID, recordingID: original.recordingID,
+                    passageIDs: [passage.id], startOffset: passage.offset, revision: original.revision)
+                return ChatEvidence(title: chunk.title, body: Self.transcriptExcerpt(passage.body, around: query), citation: citation)
+            }
+        }
+    }
+
     func chatMeetingCandidates(terms: [String], scope: UUID?, from: Date?, until: Date?) throws -> [ChatMeetingMatch] {
-        try withDatabase { db in
-            try transaction(db: db, readOnly: true) {
-                let candidates = try chatRows("""
-                    SELECT m.id, m.name, m.description, coalesce(ci.eventDate, m.createdAt), ci.details,
-                        (SELECT group_concat(t.name, char(10)) FROM meeting_tags mt JOIN tags t ON t.id = mt.tagID WHERE mt.meetingID = m.id),
-                        ci.calendarName
+        let terms = MeetingChatRetrieval.terms(from: terms.joined(separator: " ")).prefix(16)
+        let score = terms.isEmpty ? "1" : terms.map { _ in "chat_contains(metadata, ?)" }.joined(separator: " + ")
+        let start = from.map { String($0.timeIntervalSince1970) }
+        let end = until.map { String($0.timeIntervalSince1970) }
+        return try withDatabase { db in
+            try check(sqlite3_create_function_v2(db, "chat_contains", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC, nil,
+                { context, _, values in
+                    guard let values, let haystack = sqlite3_value_text(values[0]), let needle = sqlite3_value_text(values[1]) else {
+                        sqlite3_result_int(context, 0)
+                        return
+                    }
+                    let matched = String(cString: haystack).range(of: String(cString: needle),
+                        options: [.caseInsensitive, .diacriticInsensitive]) != nil
+                    sqlite3_result_int(context, matched ? 1 : 0)
+                }, nil, nil, nil))
+            return try chatRows("""
+                WITH candidates AS (
+                    SELECT m.id, m.name, m.description, coalesce(ci.eventDate, m.createdAt) AS date, ci.details, ms.text AS summary,
+                        (SELECT group_concat(t.name, char(10)) FROM meeting_tags mt JOIN tags t ON t.id = mt.tagID
+                         WHERE mt.meetingID = m.id) AS tags
                     FROM meetings m LEFT JOIN calendar_meeting_inputs ci ON ci.meetingID = m.id
+                    LEFT JOIN meeting_summaries ms ON ms.meetingID = m.id
                     WHERE (? IS NULL OR upper(m.id) = ?)
-                    ORDER BY coalesce(ci.eventDate, m.createdAt) DESC, m.id
-                    """, [scope?.uuidString, scope?.uuidString], db: db) { row -> ChatMeetingMatch in
+                      AND (? IS NULL OR coalesce(ci.eventDate, m.createdAt) >= CAST(? AS REAL))
+                      AND (? IS NULL OR coalesce(ci.eventDate, m.createdAt) < CAST(? AS REAL))
+                ), searchable AS (
+                    SELECT *, name || ' ' || coalesce(description, '') || ' ' || coalesce(tags, '') || ' ' || coalesce(summary, '') || ' ' ||
+                        CASE WHEN json_valid(details) THEN
+                            coalesce(json_extract(details, '$.notes'), '') || ' ' ||
+                            coalesce(json_extract(details, '$.attendees'), '') || ' ' ||
+                            coalesce(json_extract(details, '$.organizer'), '')
+                        ELSE '' END AS metadata
+                    FROM candidates
+                ), ranked AS (
+                    SELECT id, name, description, date, details, tags, summary, \(score) AS score FROM searchable
+                )
+                SELECT id, name, description, date, details, tags, summary
+                FROM ranked WHERE score > 0 ORDER BY score DESC, date DESC, id LIMIT 8
+                """, [scope?.uuidString, scope?.uuidString, start, start, end, end] + terms.map(Optional.some), db: db) { row in
                     guard let id = text(row, column: 0).flatMap(UUID.init(uuidString:)),
                           let title = text(row, column: 1) else { throw MeetingStoreError.invalidRecord }
                     let invite = text(row, column: 4).flatMap {
                         try? JSONDecoder().decode(CalendarEventDetails.self, from: Data($0.utf8))
                     }
                     let notes = text(row, column: 2) ?? invite?.notes
+                    let summaryExcerpt = text(row, column: 6).map { summary in
+                        let keyword = terms.first { summary.localizedStandardContains($0) } ?? ""
+                        return Self.transcriptExcerpt(summary, around: keyword)
+                    }
                     return ChatMeetingMatch(id: id, title: String(title.prefix(200)),
                         date: Date(timeIntervalSince1970: sqlite3_column_double(row, 3)),
                         description: notes.map { String($0.prefix(240)) },
                         tags: (text(row, column: 5) ?? "").components(separatedBy: .newlines).filter { !$0.isEmpty },
-                        invitees: (invite?.attendees ?? []) + [invite?.organizer].compactMap { $0 })
+                        invitees: (invite?.attendees ?? []) + [invite?.organizer].compactMap { $0 },
+                        summaryExcerpt: summaryExcerpt)
                 }
-                let terms = MeetingChatRetrieval.terms(from: terms.joined(separator: " ")).prefix(16)
-                return candidates.compactMap { meeting -> (ChatMeetingMatch, Int)? in
-                    if let from, meeting.date < from { return nil }
-                    if let until, meeting.date >= until { return nil }
-                    let metadata = ([meeting.title, meeting.description ?? ""] + meeting.tags + meeting.invitees)
-                        .joined(separator: " ")
-                    let score = terms.filter { metadata.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }.count
-                    return terms.isEmpty || score > 0 ? (meeting, score) : nil
-                }.sorted { left, right in
-                    left.1 == right.1 ? left.0.date > right.0.date : left.1 > right.1
-                }.prefix(8).map(\.0)
-            }
         }
     }
 

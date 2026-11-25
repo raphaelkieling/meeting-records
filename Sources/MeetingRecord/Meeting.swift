@@ -60,7 +60,7 @@ enum MeetingStoreError: Error, LocalizedError {
         switch self {
         case .invalidRecord: "The database contains an invalid meeting."
         case .invalidDirectory: "The data directory must be a valid absolute path."
-        case .incompatibleVersion: "The database version is not supported by this app."
+        case .incompatibleVersion: "This version of Meeting Record cannot open your library. Open a newer build of Meeting Record."
         case .emptyName: "Enter a meeting name."
         case .emptyTagName: "Enter a label name."
         case .duplicateTagName: "A label with that name already exists."

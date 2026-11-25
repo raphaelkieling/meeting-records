@@ -127,11 +127,7 @@ struct CalendarView: View {
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.quaternary, lineWidth: 1))
         .contentShape(RoundedRectangle(cornerRadius: 10))
         .onTapGesture(count: 2) {
-            let title = Meeting.normalizedDescription(event.title) ?? "Untitled Event"
-            let details = CalendarEventDetails(title: title, notes: Meeting.normalizedDescription(event.notes),
-                                               endDate: event.endDate, organizer: Meeting.normalizedDescription(event.organizer?.name),
-                                               attendees: (event.attendees ?? []).compactMap { Meeting.normalizedDescription($0.name) })
-            createMeeting(details, event.startDate ?? .now, event.calendar.title)
+            createMeeting(event.meetingDetails, event.startDate ?? .now, event.calendar.title)
         }
         .help("Double-click to create a meeting")
         .accessibilityHint("Double-click to create a meeting with this title and description")
@@ -154,5 +150,14 @@ struct CalendarView: View {
         guard access == .fullAccess else { return }
         events = store.events(matching: store.predicateForEvents(withStart: start, end: end, calendars: nil))
             .sorted { $0.startDate < $1.startDate }
+    }
+}
+
+extension EKEvent {
+    var meetingDetails: CalendarEventDetails {
+        CalendarEventDetails(title: Meeting.normalizedDescription(title) ?? "Untitled Event",
+            notes: Meeting.normalizedDescription(notes), endDate: endDate,
+            organizer: Meeting.normalizedDescription(organizer?.name),
+            attendees: (attendees ?? []).compactMap { Meeting.normalizedDescription($0.name) })
     }
 }

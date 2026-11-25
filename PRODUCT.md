@@ -63,7 +63,7 @@ A primeira versão permite ler e copiar o texto. Edição manual, reprodução s
 
 ## Meeting search and labels
 
-- A Search entry below Home opens a dedicated view with a plain text field and a label filter to its right.
+- Search below Home opens the command palette, also available with Command-K. Transcript results show the meeting, timestamp, and a matching excerpt.
 - Meetings can have an optional plain-text description. Users can edit it from a meeting's context menu; the saved description appears beneath the meeting title and can be searched.
 - Text search covers meeting titles, descriptions, available transcript text, and label names. Results update while typing and show a relevant transcript excerpt when the match comes from transcript text, plus a non-empty meeting description beneath its title.
 - Text and label filters combine with AND. Selecting multiple labels returns meetings containing every selected label. With no text, selected labels filter the list on their own.
@@ -75,8 +75,8 @@ A primeira versão permite ler e copiar o texto. Edição manual, reprodução s
 ## Meeting Chat expansion
 
 - Chat opens from the sidebar below Search. Its header provides History and New Chat. User messages appear in right-aligned red bubbles. Assistant replies appear as streaming Markdown.
-- Chat uses the selected model configured in Chat settings, independently from Summarization. Apple Intelligence runs on device; selected GPT models use the OpenAI API and a separate API key.
-- Chat retrieves transcript passages locally, cites the evidence, and links citations to the original transcript. Saved conversations and the search index stay on the Mac.
+- Settings → AI provides a shared OpenAI API key and a default model, with optional model overrides for Chat and Summary. Apple Intelligence runs on device.
+- Chat retrieves transcript passages locally and links citations to the exact transcript row, with playback from that timestamp and a shortcut back to the answer. Saved conversations and the search index stay on the Mac.
 - Acceptance requires validating citations against Portuguese, Spanish, and English transcripts and verifying that history and retrieval respect meeting deletion.
 
 ## Armazenamento e exclusão
@@ -85,7 +85,7 @@ O conteúdo é mantido localmente até exclusão manual; transcrever não apaga 
 
 ## Setup e decisões técnicas pendentes
 
-O setup permite baixar explicitamente o modelo necessário, mostrando tamanho e progresso. Depois disso, o fluxo principal funciona sem internet.
+Recording works once audio permissions are granted. A transcription model can be downloaded separately and processes queued audio on the Mac, even offline. Setup shows the download size and progress.
 
 A primeira versão terá um único motor e modelo validados, sem interface de comparação. Whisper e Parakeet são candidatos, não escolhas confirmadas. A avaliação técnica deve determinar:
 

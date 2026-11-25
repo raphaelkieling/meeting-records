@@ -24,6 +24,12 @@ final class RecordingStorageTests: XCTestCase {
             .appendingPathComponent(recording.id.uuidString)
         XCTAssertEqual(try AVAudioFile(forReading: directory.appendingPathComponent("me/0.caf")).length, 4_800)
         XCTAssertEqual(try AVAudioFile(forReading: directory.appendingPathComponent("other/125000000.caf")).length, 4_800)
+
+        let bytes = try await RecordingStorage.bytesUsed(at: root)
+        XCTAssertGreaterThan(bytes, 0)
+        try FileManager.default.removeItem(at: directory)
+        let bytesAfterDeletion = try await RecordingStorage.bytesUsed(at: root)
+        XCTAssertEqual(bytesAfterDeletion, 0)
     }
 
     func testRecoversPublishedCheckpointMissingFromSQLite() async throws {
@@ -88,7 +94,7 @@ final class RecordingStorageTests: XCTestCase {
         _ = try await storage.append(sample(source: .me, offset: 0, value: 0.25))
         try await storage.finish()
         let active = try await store.loadHomeSummary()
-        XCTAssertTrue(active.savedRecordingIDs.isEmpty)
+        XCTAssertEqual(active.savedRecordingCount, 0)
         do {
             try await store.deleteMeeting(recording.meetingID)
             XCTFail("An active Meeting must remain available.")
@@ -127,7 +133,9 @@ final class RecordingStorageTests: XCTestCase {
             XCTFail("Expected the database trigger to reject deletion.")
         } catch MeetingStoreError.sqlite {}
         let intact = try await store.loadHomeSummary()
-        XCTAssertEqual(intact.savedRecordingIDs, [recording.id])
+        XCTAssertEqual(intact.savedRecordingCount, 1)
+        XCTAssertEqual(intact.recordedTime, 0.1, accuracy: 0.000_001)
+        XCTAssertTrue(intact.missingDurationIDs.isEmpty)
         XCTAssertEqual(intact.completedTranscriptions, 1)
         XCTAssertTrue(FileManager.default.fileExists(atPath: target.path))
         let noPending = try await store.pendingMeetingDeletions()
@@ -138,7 +146,7 @@ final class RecordingStorageTests: XCTestCase {
         let reopened = MeetingStore(databaseURL: database)
         let after = try await reopened.loadHomeSummary()
         XCTAssertEqual(after.meetings.map(\.id), [sibling.id])
-        XCTAssertTrue(after.savedRecordingIDs.isEmpty)
+        XCTAssertEqual(after.savedRecordingCount, 0)
         XCTAssertEqual(after.completedTranscriptions, 0)
         let lateClaim = try await reopened.claimTranscript(recording.id, model: .base)
         XCTAssertEqual(lateClaim, .removed)
@@ -165,6 +173,59 @@ final class RecordingStorageTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: siblingDirectory.path))
         let cleared = try await reopened.pendingMeetingDeletions()
         XCTAssertTrue(cleared.isEmpty)
+    }
+
+    func testRemovingOneRecordingKeepsOtherInputsAndRetriesFileCleanup() async throws {
+        let (store, root, recording) = try await fixture()
+        do {
+            try await store.deleteRecording(recording)
+            XCTFail("Expected active recording removal to fail.")
+        } catch MeetingStoreError.meetingRecording {}
+
+        let storage = RecordingStorage(store: store, root: root, recording: recording)
+        _ = try await storage.append(sample(source: .me, offset: 0, value: 0.25))
+        try await storage.finish()
+        try await store.finalizeRecording(recording.id, endedAt: .now, interrupted: false)
+        let clips = try await store.audioSegments(for: recording.id)
+        let clip = try XCTUnwrap(clips.first)
+        let audio = root.appendingPathComponent(clip.relativePath)
+        _ = try await store.claimTranscript(recording.id, model: .base)
+        try await store.saveTranscript(clip, result: .init(processedThrough: 100_000_000,
+            segments: [.init(startOffset: 0, endOffset: 100_000_000, text: "Removed source")]))
+        var answer = ChatMessage(role: .assistant, body: "Removed source", status: .streaming, requestID: UUID())
+        answer.citations = [.init(meetingID: recording.meetingID, recordingID: recording.id,
+                                  passageIDs: ["passage"], startOffset: 0, revision: 0)]
+        let chat = ChatConversation(title: "Recording source", messages: [answer])
+        try await store.saveChat(chat, changed: 1, create: true)
+
+        let other = Recording(id: UUID(), meetingID: recording.meetingID, startedAt: .now, endedAt: nil, state: .starting)
+        try await store.beginRecording(other)
+        try await store.markRecordingStarted(other.id)
+        try await store.deleteRecording(recording)
+
+        let reopened = MeetingStore(databaseURL: root.deletingLastPathComponent().appendingPathComponent("meetings.sqlite"))
+        let inputs = try await reopened.recordings(for: recording.meetingID, includeActive: true)
+        XCTAssertEqual(inputs.map(\.id), [other.id])
+        let passages = try await reopened.transcriptPassages(for: recording.meetingID)
+        XCTAssertTrue(passages.isEmpty)
+        try await reopened.saveChat(chat, changed: 1, create: false)
+        let history = try await reopened.loadChatHistory()
+        XCTAssertEqual(history.first?.messages.first?.status, .sourceRemoved)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: audio.path))
+
+        let blocker = root.appendingPathComponent(".deletions")
+        try Data().write(to: blocker)
+        do {
+            _ = try await RecordingStorage.finishMeetingDeletions(store: reopened)
+            XCTFail("Expected file cleanup to remain pending.")
+        } catch {}
+        let pending = try await reopened.pendingRecordingDeletions()
+        XCTAssertEqual(pending.map(\.recordingID), [recording.id])
+        try FileManager.default.removeItem(at: blocker)
+        try await RecordingStorage.finishMeetingDeletions(store: reopened)
+        let cleared = try await reopened.pendingRecordingDeletions()
+        XCTAssertTrue(cleared.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: audio.path))
     }
 
     private func fixture() async throws -> (MeetingStore, URL, Recording) {

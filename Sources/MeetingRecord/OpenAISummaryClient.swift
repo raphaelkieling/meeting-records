@@ -1,14 +1,21 @@
 import Foundation
 import Security
 
-enum OpenAISummaryKey {
+enum OpenAIKey {
     // Only the presence flag is stored in preferences.
-    static let savedPreferenceKey = "openAISummaryKeySaved"
+    static let savedPreferenceKey = "openAIKeySaved"
+    private static let legacyDisabled = "openAILegacyKeysDisabled"
 
-    private static var query: [String: Any] {
+    static var hasConfiguredKey: Bool {
+        let defaults = UserDefaults.standard
+        return defaults.bool(forKey: savedPreferenceKey) || (!defaults.bool(forKey: legacyDisabled) &&
+            (defaults.bool(forKey: "openAIChatKeySaved") || defaults.bool(forKey: "openAISummaryKeySaved")))
+    }
+
+    private static func query(_ service: String = "OpenAI") -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: (Bundle.main.bundleIdentifier ?? "MeetingRecord") + ".OpenAISummary",
+            kSecAttrService as String: (Bundle.main.bundleIdentifier ?? "MeetingRecord") + "." + service,
             kSecAttrAccount as String: "API Key"
         ]
     }
@@ -19,15 +26,32 @@ enum OpenAISummaryKey {
             throw OpenAISummaryError.invalidKey
         }
         let attributes = [kSecValueData as String: Data(key.utf8)]
-        var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        var status = SecItemUpdate(query() as CFDictionary, attributes as CFDictionary)
         if status == errSecItemNotFound {
-            status = SecItemAdd(query.merging(attributes) { _, value in value } as CFDictionary, nil)
+            status = SecItemAdd(query().merging(attributes) { _, value in value } as CFDictionary, nil)
         }
         guard status == errSecSuccess else { throw OpenAISummaryError.keychain(status) }
+        UserDefaults.standard.set(true, forKey: savedPreferenceKey)
+        UserDefaults.standard.set(true, forKey: legacyDisabled)
     }
 
-    static func load() throws -> String {
-        var request = query
+    static func load(for feature: AISettings.Feature) throws -> String {
+        do { return try read() }
+        catch OpenAISummaryError.missingKey {
+            guard !UserDefaults.standard.bool(forKey: legacyDisabled) else { throw OpenAISummaryError.missingKey }
+            let services = feature == .chat ? ["OpenAIChat", "OpenAISummary"] : ["OpenAISummary", "OpenAIChat"]
+            for service in services {
+                let flag = service == "OpenAIChat" ? "openAIChatKeySaved" : "openAISummaryKeySaved"
+                guard UserDefaults.standard.bool(forKey: flag) else { continue }
+                do { return try read(service) }
+                catch OpenAISummaryError.missingKey { continue }
+            }
+            throw OpenAISummaryError.missingKey
+        }
+    }
+
+    private static func read(_ service: String = "OpenAI") throws -> String {
+        var request = query(service)
         request[kSecReturnData as String] = true
         request[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
@@ -41,10 +65,12 @@ enum OpenAISummaryKey {
     }
 
     static func remove() throws {
-        let status = SecItemDelete(query as CFDictionary)
+        let status = SecItemDelete(query() as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw OpenAISummaryError.keychain(status)
         }
+        UserDefaults.standard.set(false, forKey: savedPreferenceKey)
+        UserDefaults.standard.set(true, forKey: legacyDisabled)
     }
 }
 
@@ -55,7 +81,7 @@ enum OpenAISummaryError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .invalidKey: "Enter an OpenAI API key without spaces or line breaks."
-        case .missingKey: "Save an OpenAI API key in the model settings."
+        case .missingKey: "Save an OpenAI API key in Settings → AI."
         case .keychain(let status): "Could not access the macOS Keychain (code \(status))."
         case .unauthorized: "OpenAI rejected the API key. Check its permissions or replace it in Settings."
         case .modelUnavailable: "This model is unavailable for your OpenAI API project. Choose another model in Settings."

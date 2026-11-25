@@ -16,6 +16,10 @@ final class RecordingPlayback: ObservableObject {
             stop()
             return
         }
+        play(recordingID, store: store)
+    }
+
+    func play(_ recordingID: UUID, store: MeetingStore, startOffset: Int64 = 0) {
         stop()
         let request = UUID()
         requestID = request
@@ -32,6 +36,11 @@ final class RecordingPlayback: ObservableObject {
                 observe(item, request: request)
                 let player = AVPlayer(playerItem: item)
                 self.player = player
+                if startOffset > 0 {
+                    await player.seek(to: CMTime(value: startOffset, timescale: 1_000_000_000),
+                                      toleranceBefore: .zero, toleranceAfter: .zero)
+                }
+                guard requestID == request else { return }
                 player.play()
             } catch {
                 self?.finish(request, error: error.localizedDescription)

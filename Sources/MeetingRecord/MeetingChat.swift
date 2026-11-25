@@ -62,12 +62,26 @@ struct ChatRequest: Sendable {
     let question: String
     let scope: UUID?
     let priorMessages: [ChatMessage]
+    var thinkLonger = false
+}
+
+enum ChatActivity: Sendable {
+    case preparing, searching, writing
+
+    var label: String {
+        switch self {
+        case .preparing: "Preparing answer…"
+        case .searching: "Searching meetings…"
+        case .writing: "Writing answer…"
+        }
+    }
 }
 
 struct ChatUpdate: Sendable {
     let text: String
     var citations: [ChatCitation] = []
     var sourceIDs: Set<UUID> = []
+    var activity: ChatActivity?
 }
 
 typealias ChatProducer = @Sendable (ChatRequest) -> AsyncThrowingStream<ChatUpdate, Error>

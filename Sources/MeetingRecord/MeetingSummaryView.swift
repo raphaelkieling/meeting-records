@@ -11,10 +11,11 @@ struct MeetingSummaryView: View {
     let isRecording: Bool
     @ObservedObject var summaries: MeetingSummaryCoordinator
     @Environment(\.scenePhase) private var scenePhase
-    @AppStorage(SummaryModel.preferenceKey) private var selectedModel: SummaryModel = .appleIntelligence
+    @AppStorage(SummaryModel.preferenceKey) private var modelOverride = ""
+    @AppStorage(AISettings.defaultModelKey) private var defaultModel = SummaryModel.appleIntelligence.rawValue
+    private var selectedModel: SummaryModel { AISettings.resolve(modelOverride, defaultModel: defaultModel) }
     @AppStorage(SummaryPrompt.libraryKey) private var promptLibrary = Data()
     @AppStorage(SummaryPrompt.legacyPreferenceKey) private var legacyPrompt = ""
-    @AppStorage(OpenAISummaryKey.savedPreferenceKey) private var hasOpenAIKey = false
     @State private var snapshot: MeetingSummarySnapshot?
     @State private var loadError: String?
     @State private var modelAvailability: MeetingSummarizer.Availability?
@@ -35,7 +36,7 @@ struct MeetingSummaryView: View {
     private var isGenerating: Bool { summaries.generating.contains(meetingID) }
     private var canGenerate: Bool {
         snapshot?.canGenerate == true && !isRecording && !isGenerating &&
-        (selectedModel.usesOpenAI ? hasOpenAIKey : modelAvailability == .ready) && loadError == nil
+        (selectedModel.usesOpenAI ? OpenAIKey.hasConfiguredKey : modelAvailability == .ready) && loadError == nil
     }
 
     var body: some View {
@@ -160,7 +161,7 @@ struct MeetingSummaryView: View {
         }
         guard snapshot?.canGenerate == true else { return "There is no transcript to summarize yet." }
         if selectedModel.usesOpenAI {
-            return hasOpenAIKey ? nil : "Save an OpenAI API key in Settings → Summarization."
+            return OpenAIKey.hasConfiguredKey ? nil : "Save an OpenAI API key in Settings → AI."
         }
         return modelAvailability?.message
     }

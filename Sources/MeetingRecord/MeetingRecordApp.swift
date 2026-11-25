@@ -46,7 +46,16 @@ private struct OpenCommandPaletteKey: FocusedValueKey {
     typealias Value = () -> Void
 }
 
+private struct FindInTranscriptKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
 extension FocusedValues {
+    var findInTranscript: (() -> Void)? {
+        get { self[FindInTranscriptKey.self] }
+        set { self[FindInTranscriptKey.self] = newValue }
+    }
+
     var renameMeeting: (() -> Void)? {
         get { self[RenameMeetingKey.self] }
         set { self[RenameMeetingKey.self] = newValue }
@@ -59,6 +68,7 @@ extension FocusedValues {
 }
 
 private struct MeetingCommands: Commands {
+    @FocusedValue(\.findInTranscript) private var findInTranscript
     @FocusedValue(\.renameMeeting) private var rename
     @FocusedValue(\.openCommandPalette) private var openCommandPalette
 
@@ -67,6 +77,9 @@ private struct MeetingCommands: Commands {
             Button("Search…") { openCommandPalette?() }
                 .keyboardShortcut("k", modifiers: .command)
                 .disabled(openCommandPalette == nil)
+            Button("Find in Transcript…") { findInTranscript?() }
+                .keyboardShortcut("f", modifiers: .command)
+                .disabled(findInTranscript == nil)
             Button("Rename Meeting") { rename?() }
                 .keyboardShortcut("r", modifiers: [.command, .shift])
                 .disabled(rename == nil)

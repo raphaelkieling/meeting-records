@@ -17,6 +17,14 @@ final class RecordingMenuBar: NSObject, NSApplicationDelegate {
         recording.state == .idle
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        Task {
+            await recording.transcription.shutdown()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     private func updateStatusItem(for state: RecordingCoordinator.State) {
         let canStop: Bool
         switch state {
@@ -35,8 +43,13 @@ final class RecordingMenuBar: NSObject, NSApplicationDelegate {
         let title = canStop ? "Recording" : "Saving Recording…"
         let symbol = canStop ? "record.circle.fill" : "hourglass"
         let label = "Meeting Record: \(title)"
-        item.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
-        item.button?.contentTintColor = canStop ? .systemRed : nil
+        let symbolImage = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+        if canStop, let recordingImage = symbolImage?.withSymbolConfiguration(.init(paletteColors: [.systemRed])) {
+            recordingImage.isTemplate = false
+            item.button?.image = recordingImage
+        } else {
+            item.button?.image = symbolImage
+        }
         item.button?.setAccessibilityLabel(label)
         item.button?.toolTip = label
 

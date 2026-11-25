@@ -34,6 +34,9 @@ final class MeetingStoreTests: XCTestCase {
 
     private func dropChatSchema(at url: URL) throws {
         try execute("""
+            DROP INDEX recording_missing_duration;
+            ALTER TABLE recordings DROP COLUMN duration;
+            ALTER TABLE audio_segments DROP COLUMN duration;
             DROP TABLE chat_sources;
             DROP TABLE chat_messages;
             DROP TABLE chat_conversations;
@@ -46,11 +49,11 @@ final class MeetingStoreTests: XCTestCase {
             """, at: url)
     }
 
-    func testFreshDatabaseIsEmptyV10() async throws {
+    func testFreshDatabaseIsEmptyV11() async throws {
         let url = try temporaryURL()
         let meetings = try await MeetingStore(databaseURL: url).loadMeetings()
         XCTAssertTrue(meetings.isEmpty)
-        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 10)
+        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 12)
     }
 
     func testThirtyRecordsReopenUnicodeDuplicateNamesAndStableOrder() async throws {
@@ -88,17 +91,18 @@ final class MeetingStoreTests: XCTestCase {
             DROP TABLE meeting_summaries;
             DROP TABLE pending_meeting_deletions;
             DROP TABLE calendar_meeting_inputs;
+            DROP TABLE pending_recording_deletions;
             PRAGMA user_version=4;
             """, at: url)
 
         let reopened = MeetingStore(databaseURL: url)
         let summary = try await reopened.loadHomeSummary()
         XCTAssertEqual(summary.meetings.map(\.id), meetings.suffix(3).reversed().map(\.id))
-        XCTAssertEqual(summary.savedRecordingIDs, [])
+        XCTAssertEqual(summary.savedRecordingCount, 0)
         XCTAssertEqual(summary.completedTranscriptions, 0)
         let all = try await reopened.loadMeetings()
         XCTAssertEqual(all.first?.name, "Renamed first")
-        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 10)
+        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 12)
     }
 
     func testTranscriptionWorkBatchesAdjacentCheckpointsPerSource() async throws {
@@ -183,6 +187,13 @@ final class MeetingStoreTests: XCTestCase {
 
         let persisted = try await MeetingStore(databaseURL: url).loadMeetings()
         XCTAssertEqual(persisted, [edited])
+        let unlinked = try await store.removeCalendarLink(from: meeting.id)
+        XCTAssertNil(unlinked.calendarEventDate)
+        XCTAssertNil(unlinked.calendarName)
+        XCTAssertEqual(unlinked.name, edited.name)
+        XCTAssertEqual(unlinked.tags, edited.tags)
+        let reopened = try await MeetingStore(databaseURL: url).loadMeetings()
+        XCTAssertEqual(reopened, [unlinked])
     }
 
     func testCalendarSummaryUsesAvailableFieldsAfterVersionEightMigration() async throws {
@@ -194,11 +205,15 @@ final class MeetingStoreTests: XCTestCase {
         try dropChatSchema(at: url)
         try execute("""
             ALTER TABLE calendar_meeting_inputs DROP COLUMN details;
+            DROP TABLE pending_recording_deletions;
             PRAGMA user_version=8;
             """, at: url)
 
-        let snapshot = try await MeetingStore(databaseURL: url).summarySnapshot(for: meeting.id)
-        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 10)
+        let reopened = MeetingStore(databaseURL: url)
+        let snapshot = try await reopened.summarySnapshot(for: meeting.id)
+        let scheduledEnd = try await reopened.scheduledEnd(for: meeting.id)
+        XCTAssertNil(scheduledEnd)
+        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 12)
         XCTAssertEqual(snapshot.context, """
             Meeting title: Quarterly review
             Calendar: Work
@@ -230,6 +245,10 @@ final class MeetingStoreTests: XCTestCase {
                                                     calendarEventDate: scheduledStart, calendarName: "Work",
                                                     calendarDetails: invite)
         let other = try await store.createMeeting(id: UUID(), name: "Other meeting")
+        let linkedEnd = try await store.scheduledEnd(for: meeting.id)
+        let unlinkedEnd = try await store.scheduledEnd(for: other.id)
+        XCTAssertEqual(linkedEnd, invite.endDate)
+        XCTAssertNil(unlinkedEnd)
         let empty = try await store.summarySnapshot(for: meeting.id)
         XCTAssertFalse(empty.canGenerate)
 
@@ -321,11 +340,11 @@ final class MeetingStoreTests: XCTestCase {
 
     func testFutureVersionIsPreservedByteForByte() async throws {
         let url = try temporaryURL()
-        try execute("CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES ('preserve'); PRAGMA user_version=11", at: url)
+        try execute("CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES ('preserve'); PRAGMA user_version=13", at: url)
         let original = try Data(contentsOf: url)
         do { _ = try await MeetingStore(databaseURL: url).loadMeetings(); XCTFail("Expected incompatible version") } catch {}
         XCTAssertEqual(try Data(contentsOf: url), original)
-        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 11)
+        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 13)
     }
 
     func testInitializationFailureRollsBackWithoutChangingExistingSchema() async throws {

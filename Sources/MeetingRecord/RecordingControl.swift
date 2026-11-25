@@ -13,7 +13,7 @@ struct RecordingControl: View {
 
     private var isRecording: Bool { state == .recording(meetingID) }
     private var isWorking: Bool { state == .starting(meetingID) || state == .finishing(meetingID) }
-    private var needsModel: Bool { state == .idle && !modelReady }
+    private var showTranscriptionSetup: Bool { state == .idle && !modelReady }
     private var blocked: Bool { state.meetingID.map { $0 != meetingID } ?? false }
     private var label: String {
         if isRecording { return "Stop Recording" }
@@ -44,25 +44,26 @@ struct RecordingControl: View {
                         } else {
                             Image(systemName: isRecording ? "stop.fill" : "circle.fill")
                                 .font(.system(size: 17, weight: .semibold))
-                                .foregroundStyle((blocked || needsModel) ? Color.secondary : .white)
+                                .foregroundStyle(blocked ? Color.secondary : .white)
                         }
                     }
                     .frame(width: 50, height: 50)
                     .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
-                .focusable(!isWorking && !blocked && !needsModel)
-                .disabled(isWorking || blocked || needsModel)
+                .focusable(!isWorking && !blocked)
+                .disabled(isWorking || blocked)
                 .accessibilityLabel(label)
-                .help(needsModel ? "Install a transcription model to record." : label)
+                .help(label)
             }
-            .background((blocked || needsModel) ? Color(nsColor: .controlBackgroundColor)
+            .background(blocked ? Color(nsColor: .controlBackgroundColor)
                         : isRecording ? Color(white: 0.15) : .meetingAccent, in: Capsule())
             .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
-            if needsModel {
-                Button("Set up transcription in Settings", action: openSettings)
+            if showTranscriptionSetup {
+                Button("Set Up Transcription", action: openSettings)
                     .buttonStyle(.link)
                     .font(.caption)
+                    .help("Record now and transcribe after installing a model.")
             } else {
                 Text("Another Meeting is recording or finishing.")
                     .font(.caption)

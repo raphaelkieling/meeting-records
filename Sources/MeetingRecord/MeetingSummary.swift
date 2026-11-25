@@ -46,7 +46,7 @@ enum SummaryModel: String, CaseIterable {
     }
 
     static var selected: Self {
-        UserDefaults.standard.string(forKey: preferenceKey).flatMap(Self.init(rawValue:)) ?? .appleIntelligence
+        AISettings.model(for: .summary)
     }
 }
 
@@ -152,7 +152,7 @@ enum MeetingSummarizer {
     static func generate(_ transcript: String, context: String, model: SummaryModel, prompt: String) async throws -> String {
         let instructions = SummaryPrompt.instructions(for: prompt)
         if model.usesOpenAI {
-            let key = try OpenAISummaryKey.load()
+            let key = try OpenAIKey.load(for: .summary)
             let client = OpenAISummaryClient(model: model, key: key)
             return try await summarizeSections(transcript[...], requestByteLimit: 120_000, respond: { source, merging in
                 try await client.respond(instructions: instructions, input: input(for: source, context: context, merging: merging))

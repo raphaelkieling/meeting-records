@@ -43,7 +43,7 @@ struct FirstLaunchSetupView: View {
                         .foregroundStyle(.secondary)
                     RecordingPermissionsView(microphoneAllowed: $microphoneAllowed, showsHeading: false)
                 case .transcription:
-                    Text("Download a model once to transcribe meetings on this Mac, even offline.")
+                    Text("You can record right away. Download a model to transcribe saved audio on this Mac, even offline.")
                         .foregroundStyle(.secondary)
                     modelCard
                 }

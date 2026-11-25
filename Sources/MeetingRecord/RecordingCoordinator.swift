@@ -36,13 +36,15 @@ final class RecordingCoordinator: ObservableObject {
     @Published private(set) var state = State.idle
     @Published private(set) var revision = 0
     @Published var error: String?
-    @Published var cleanupError: String?
+    @Published private(set) var cleanupError: String?
     @Published private var deletingMeetings: Set<UUID> = []
     private var isCleaningUp = false
     private var cleanupRequested = false
     let levels = CurrentValueSubject<Double, Never>(0)
     let microphoneRMS = CurrentValueSubject<Double, Never>(0)
     private var session: Session?
+    private var autoStop: RecordingAutoStop?
+    private var autoStopMonitor: Task<Void, Never>?
     private var checkedRecovery = false
     @Published private(set) var microphoneID = UserDefaults.standard.string(forKey: "selectedMicrophoneID") ?? ""
     private var microphoneMeter: RecordingCapture?
@@ -125,6 +127,14 @@ final class RecordingCoordinator: ObservableObject {
         chat.meetingsDeleted([id])
     }
 
+    func deleteRecording(_ recording: Recording) async throws {
+        try await store.deleteRecording(recording)
+        summaries.cancel(for: recording.meetingID)
+        chat.recordingDeleted(recording.id)
+        revision += 1
+        await finishMeetingDeletions()
+    }
+
     func deleteAllMeetings() async throws {
         guard state == .idle, deletingMeetings.isEmpty else { throw RecordingError.alreadyRecording }
         let deletedIDs = try await store.deleteAllMeetings()
@@ -141,7 +151,10 @@ final class RecordingCoordinator: ObservableObject {
         while cleanupRequested {
             cleanupRequested = false
             do {
-                try await RecordingStorage.finishMeetingDeletions(store: store)
+                if try await RecordingStorage.finishMeetingDeletions(store: store) { revision += 1 }
+                cleanupError = nil
+            } catch MeetingStoreError.incompatibleVersion {
+                // Library loading already shows this error. Retrying file cleanup cannot resolve it.
                 cleanupError = nil
             } catch {
                 cleanupError = error.localizedDescription
@@ -152,7 +165,7 @@ final class RecordingCoordinator: ObservableObject {
     func toggle(for meetingID: UUID) {
         switch state {
         case .idle:
-            guard transcription.isReady, !deletingMeetings.contains(meetingID) else { return }
+            guard !deletingMeetings.contains(meetingID) else { return }
             state = .starting(meetingID)
             error = nil
             Task {
@@ -180,6 +193,7 @@ final class RecordingCoordinator: ObservableObject {
             let lock = try RecordingFileLock(root: root)
             try await RecordingStorage.recover(store: store, root: root)
             revision += 1
+            let scheduledEnd = try? await store.scheduledEnd(for: meetingID)
             let recording = Recording(id: UUID(), meetingID: meetingID, startedAt: Date(), endedAt: nil, state: .starting)
             try await store.beginRecording(recording)
             let capture = RecordingCapture()
@@ -195,6 +209,7 @@ final class RecordingCoordinator: ObservableObject {
 
             let storage = RecordingStorage(store: store, root: root, recording: recording,
                                            checkpointPublished: transcription.checkpointPublished)
+            autoStop = RecordingAutoStop(scheduledEnd: scheduledEnd)
             let consumer = Task { [weak self] in
                 var lastUpdate = ContinuousClock.now
                 var peak = 0.0
@@ -204,6 +219,7 @@ final class RecordingCoordinator: ObservableObject {
                     peak = max(peak, input.peak)
                     if sample.source == .me { rms = input.rms }
                     let now = ContinuousClock.now
+                    self?.autoStop?.observeAudio(rms: input.rms, isMicrophone: sample.source == .me, at: now)
                     if lastUpdate.duration(to: now) >= .milliseconds(75) {
                         self?.levels.send(peak)
                         self?.microphoneRMS.send(rms)
@@ -215,6 +231,18 @@ final class RecordingCoordinator: ObservableObject {
             session = Session(recording: recording, capture: capture, storage: storage, consumer: consumer, lock: lock)
             state = .recording(meetingID)
             revision += 1
+            autoStopMonitor = Task { [weak self] in
+                while !Task.isCancelled {
+                    guard let self, self.state == .recording(meetingID) else { return }
+                    let externalInput = RecordingAutoStop.externalInputRunning()
+                    if self.autoStop?.shouldStop(externalInputRunning: externalInput, at: .now, date: .now) == true {
+                        self.stop()
+                        return
+                    }
+                    do { try await Task.sleep(for: .seconds(2)) }
+                    catch { return }
+                }
+            }
             Task {
                 if case .failure(let error) = await consumer.result, state == .recording(meetingID) {
                     state = .finishing(meetingID)
@@ -230,6 +258,9 @@ final class RecordingCoordinator: ObservableObject {
 
     private func finish(cause: (any Error)? = nil) async {
         guard let session else { return }
+        autoStopMonitor?.cancel()
+        autoStopMonitor = nil
+        autoStop = nil
         var failure = cause
         do { try await session.capture.stop() }
         catch { failure = failure ?? error }

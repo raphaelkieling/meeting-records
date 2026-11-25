@@ -3,12 +3,13 @@ import SwiftUI
 struct MeetingChatView: View {
     @ObservedObject var chat: MeetingChatCoordinator
     let meetings: [Meeting]
-    let transcriptRevision: Int
-    let openCitation: (ChatCitation) async -> Bool
+    let openAISettings: () -> Void
+    let returnToMessage: UUID?
+    let openCitation: (ChatCitation, UUID) async -> Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     @FocusState private var composerFocused: Bool
-    @State private var draft = ""
+    @State private var thinkLonger = false
     @State private var followsBottom = true
     @State private var pendingDeletion: UUID?
     @State private var unavailableCitations: Set<String> = []
@@ -34,13 +35,11 @@ struct MeetingChatView: View {
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
             await chat.activate()
+            if !chat.draft.isEmpty || (chat.current.scope != nil && chat.current.messages.isEmpty) {
+                composerFocused = true
+            }
             await chat.watchModelReadiness()
-            chat.resumePendingChat()
         }
-        .task(id: transcriptRevision) {
-            await chat.refreshIndex()
-        }
-        .onChange(of: chat.current.id) { draft = "" }
         .confirmationDialog("Delete this conversation?", isPresented: Binding(
             get: { pendingDeletion != nil }, set: { if !$0 { pendingDeletion = nil } }
         )) {
@@ -83,7 +82,7 @@ struct MeetingChatView: View {
             .fixedSize()
             Button("New Chat", systemImage: "plus") {
                 chat.newChat()
-                draft = ""
+                thinkLonger = false
                 composerFocused = true
             }
             .fixedSize()
@@ -95,7 +94,7 @@ struct MeetingChatView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18) {
                     ForEach(chat.current.messages) { message in
-                        messageRow(message)
+                        messageRow(message).id(message.id)
                             .transition(reduceMotion ? .identity : .opacity.combined(with: .offset(y: 6)))
                     }
                 }
@@ -109,7 +108,6 @@ struct MeetingChatView: View {
                         return geometry.frame(in: .scrollView).maxY <= viewport.height + 32
                     } action: { followsBottom = $0 }
             }
-            .defaultScrollAnchor(.bottom)
             .contentMargins(.all, EdgeInsets(top: 0, leading: 0, bottom: 72, trailing: 12), for: .scrollContent)
             .onGeometryChange(for: Bool.self) { geometry in
                 guard let viewport = geometry.bounds(of: .scrollView) else { return false }
@@ -118,7 +116,10 @@ struct MeetingChatView: View {
             .bottomScrollFade(hasMoreBelow: hasMoreChatBelow)
             .onChange(of: chat.current.id, initial: true) {
                 followsBottom = true
-                proxy.scrollTo("chat-end", anchor: .bottom)
+                if let returnToMessage, chat.current.messages.contains(where: { $0.id == returnToMessage }) {
+                    proxy.scrollTo(returnToMessage, anchor: .center)
+                }
+                else { proxy.scrollTo("chat-end", anchor: .bottom) }
             }
             .onChange(of: chat.current.messages.count) {
                 if followsBottom { proxy.scrollTo("chat-end", anchor: .bottom) }
@@ -141,8 +142,18 @@ struct MeetingChatView: View {
                 .frame(maxWidth: .infinity, alignment: .trailing)
         } else {
             VStack(alignment: .leading, spacing: 8) {
-                if message.status == .pending { ProgressView().controlSize(.small).accessibilityLabel("Preparing reply") }
-                if !message.body.isEmpty { ChatMarkdownView(markdown: message.body) }
+                if message.status.isActive, message.body.isEmpty {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small).accessibilityHidden(true)
+                        Text(chat.activity.label).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if !message.body.isEmpty {
+                    ChatMarkdownView(markdown: message.body).equatable()
+                    if message.status.isActive {
+                        Text(chat.activity.label).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 switch message.status {
                 case .stopped: Text("Stopped").foregroundStyle(.secondary).font(.caption)
                 case .failed: Text("Reply failed").foregroundStyle(.secondary).font(.caption)
@@ -150,11 +161,18 @@ struct MeetingChatView: View {
                 case .sourceRemoved: Text("Source meeting deleted").foregroundStyle(.secondary).font(.caption)
                 default: EmptyView()
                 }
+                if chat.canRetry(message) {
+                    Button("Retry", systemImage: "arrow.clockwise") {
+                        followsBottom = true
+                        chat.retry(message, thinkLonger: thinkLonger)
+                    }
+                    .buttonStyle(.link)
+                }
                 ForEach(message.citations) { citation in
                     let title = meetings.first(where: { $0.id == citation.meetingID })?.name
                     if let title, !unavailableCitations.contains(citation.id) {
                         Button {
-                            Task { if !(await openCitation(citation)) { unavailableCitations.insert(citation.id) } }
+                            Task { if !(await openCitation(citation, message.id)) { unavailableCitations.insert(citation.id) } }
                         } label: {
                             Label("\(title) · \(citation.timestamp)", systemImage: "text.bubble")
                         }
@@ -171,18 +189,30 @@ struct MeetingChatView: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 7) {
-            if let error = chat.error { Text(error).font(.caption).foregroundStyle(.red) }
             if let reason = chat.configurationMessage {
-                Text(reason).font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Text(reason).font(.caption).foregroundStyle(.secondary)
+                    if chat.indexAvailable {
+                        Button("Open AI Settings", action: openAISettings).buttonStyle(.link)
+                    }
+                }
+            } else if let error = chat.error {
+                Text(error).font(.caption).foregroundStyle(.red)
             }
             VStack(alignment: .leading, spacing: 8) {
-                TextField("Ask about your meetings", text: $draft, axis: .vertical)
+                TextField("Ask about your meetings", text: $chat.draft, axis: .vertical)
                     .textFieldStyle(.plain).lineLimit(1...6).focused($composerFocused)
                     .onKeyPress(.return, phases: .down) { press in
                         if press.modifiers.contains(.shift) { return .ignored }
                         send(); return .handled
                     }
                 HStack {
+                    if AISettings.model(for: .chat).usesOpenAI {
+                        Toggle("Think Longer", systemImage: "brain", isOn: $thinkLonger)
+                            .toggleStyle(.button)
+                            .controlSize(.small)
+                            .help("Use more reasoning for the next answer.")
+                    }
                     Spacer()
                     if chat.isStreaming {
                         Button(action: chat.stop) {
@@ -218,12 +248,12 @@ struct MeetingChatView: View {
     private func send() {
         guard canSubmit else { return }
         followsBottom = true
-        chat.send(draft)
-        draft = ""
+        chat.submitDraft(thinkLonger: thinkLonger)
+        thinkLonger = false
     }
 
     private var canSubmit: Bool {
-        guard chat.canSend, !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        guard chat.canSend, !chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
         guard let scope = chat.current.scope else { return true }
         return meetings.contains { $0.id == scope }
     }

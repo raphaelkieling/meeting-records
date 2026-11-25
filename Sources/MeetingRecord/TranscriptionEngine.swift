@@ -33,6 +33,10 @@ actor TranscriptionEngine {
     private var nemotron: NemotronSession?
     private var isProcessing = false
 
+    func unloadNemotron() {
+        nemotron = nil
+    }
+
     func transcribe(_ audio: AudioSegment, at url: URL, using modelFolder: URL,
                     microphoneThreshold: Double = 0.001) async throws -> TranscribedCheckpoint {
         try await transcribe([audio], urls: [url], using: modelFolder, microphoneThreshold: microphoneThreshold)

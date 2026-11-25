@@ -16,6 +16,7 @@ final class TranscriptionCoordinator: ObservableObject {
     private let engine = TranscriptionEngine()
     private let events = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
     private var worker: Task<Void, Never>?
+    private var isShuttingDown = false
     private var recordingsRoot: URL?
     private var queueLock: RecordingFileLock?
     private let selectionKey = "selectedTranscriptionModel"
@@ -44,12 +45,20 @@ final class TranscriptionCoordinator: ObservableObject {
         catch { self.error = "Could not start transcription. \(error.localizedDescription)" }
     }
 
+    func shutdown() async {
+        isShuttingDown = true
+        events.continuation.finish()
+        await worker?.value
+        await engine.unloadNemotron()
+    }
+
     private func startWorker() async throws {
-        guard worker == nil else { return }
+        guard worker == nil, !isShuttingDown else { return }
         let root = try await store.recordingRoot()
         let lock = try RecordingFileLock(root: modelsRoot(root))
         // Start after capture recovery so historical offsets are fully reconciled.
         try await store.resetTranscriptionQueue()
+        guard !isShuttingDown else { return }
         queueLock = lock
         recordingsRoot = root
         installed = Set(TranscriptionModel.catalog.filter {
@@ -118,12 +127,12 @@ final class TranscriptionCoordinator: ObservableObject {
     private func drain() async {
         guard let root = recordingsRoot else { return }
         do {
-            while !Task.isCancelled {
+            while !isShuttingDown {
                 if try await store.finishDrainedTranscripts() {
                     revision += 1
                     completionRevision += 1
                 }
-                guard isReady, let work = try await store.nextTranscriptionWork() else { return }
+                guard isReady, let work = try await store.nextTranscriptionWork(), !isShuttingDown else { return }
                 let id = work.audio.recordingID
                 let pinned = work.modelID.flatMap { id in TranscriptionModel.catalog.first { $0.id == id } }
                 let model = pinned ?? selected

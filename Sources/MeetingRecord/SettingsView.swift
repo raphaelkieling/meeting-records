@@ -4,9 +4,8 @@ import SwiftUI
 
 enum SettingsSection: String, CaseIterable, Identifiable {
     case general = "General"
-    case models = "Models"
-    case summarization = "Summarization"
-    case chat = "Chat"
+    case models = "Transcription"
+    case ai = "AI"
     case data = "Data"
 
     var id: Self { self }
@@ -15,8 +14,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .general: "slider.horizontal.3"
         case .models: "waveform"
-        case .summarization: "sparkles"
-        case .chat: "bubble.left.and.bubble.right"
+        case .ai: "sparkles"
         case .data: "externaldrive"
         }
     }
@@ -29,6 +27,7 @@ struct SettingsView: View {
     let deleteAll: () -> Void
     @State private var hasMoreBelow = false
     @State private var confirmingDeleteAll = false
+    @State private var recordingUsage = "Calculating…"
 
     var body: some View {
         ScrollView {
@@ -50,7 +49,7 @@ struct SettingsView: View {
             Button("Delete All Meeting Data", role: .destructive, action: deleteAll)
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This permanently deletes every meeting, recording, transcript, and summary saved on this Mac.")
+            Text("This permanently deletes every meeting, recording, transcript, summary, and chat saved on this Mac.")
         }
     }
 
@@ -63,7 +62,7 @@ struct SettingsView: View {
                         .foregroundStyle(Color.meetingAccent)
                         .frame(width: 24)
                         .accessibilityHidden(true)
-                    Text(option.rawValue).font(.body.weight(.medium))
+                    Text(option.rawValue).font(.headline)
                     Spacer()
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                         .font(.caption.weight(.semibold))
@@ -97,13 +96,15 @@ struct SettingsView: View {
             GeneralSettings(recording: recording, transcription: transcription)
         case .models:
             TranscriptionModelSettings(transcription: transcription)
-        case .summarization:
-            SummarizationSettings()
-        case .chat:
-            ChatSettingsView()
+        case .ai:
+            AISettingsView()
         case .data:
             VStack(alignment: .leading, spacing: 12) {
-                Text("Permanently remove all meetings and their saved recordings, transcripts, and summaries from this Mac.")
+                LabeledContent("Recording Storage") {
+                    Text(recordingUsage)
+                        .foregroundStyle(.secondary)
+                }
+                Text("Permanently remove all meetings and their saved recordings, transcripts, summaries, and chats from this Mac.")
                     .foregroundStyle(.secondary)
                 Button("Delete All Meeting Data…", role: .destructive) {
                     confirmingDeleteAll = true
@@ -113,6 +114,22 @@ struct SettingsView: View {
                     Text("Stop the active recording before deleting meeting data.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+            }
+            .task(id: recording.revision) {
+                do {
+                    let root = try await recording.store.recordingRoot()
+                    repeat {
+                        let bytes = try await RecordingStorage.bytesUsed(at: root)
+                        try Task.checkCancellation()
+                        let gigabytes = (Double(bytes) / 1_000_000_000)
+                            .formatted(.number.precision(.fractionLength(3)))
+                        recordingUsage = bytes > 0 && bytes < 1_000_000 ? "< 0.001 GB" : "\(gigabytes) GB"
+                        guard case .recording = recording.state else { break }
+                        try await Task.sleep(for: .seconds(10))
+                    } while !Task.isCancelled
+                } catch {
+                    if !Task.isCancelled { recordingUsage = "Unavailable" }
                 }
             }
         }
@@ -146,9 +163,8 @@ private struct GeneralSettings: View {
                     }
                 }
                 .disabled(recording.state != .idle)
-                Text("Microphone Sensitivity").font(.headline)
-                Text("Only microphone audio above this level is sent for transcription. The full recording is always saved.")
-                    .foregroundStyle(.secondary)
+                SettingsHeading("Microphone Sensitivity")
+                SettingsNote("This threshold only affects transcription. The full microphone recording is saved.")
                 if isTestingMicrophone {
                     microphoneLevelMeter
                 }
@@ -217,8 +233,7 @@ private struct TranscriptionModelSettings: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             if !transcription.isReady {
-                Text("Download a model to enable recording and local transcription.")
-                    .foregroundStyle(.secondary)
+                SettingsNote("Download a model to transcribe recordings on this Mac.")
             }
             VStack(spacing: 0) {
                 ForEach(TranscriptionModel.catalog) { model in
@@ -268,85 +283,14 @@ private struct TranscriptionModelSettings: View {
     }
 }
 
-private struct SummarizationSettings: View {
-    @AppStorage(SummaryModel.preferenceKey) private var model: SummaryModel = .appleIntelligence
-    @AppStorage(OpenAISummaryKey.savedPreferenceKey) private var hasOpenAIKey = false
-    @State private var draftKey = ""
-    @State private var isChangingKey = false
-    @State private var keyError: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Picker("Model", selection: $model) {
-                ForEach(SummaryModel.allCases, id: \.self) { option in
-                    Text(option.displayName).tag(option)
-                }
-            }
-            if model.usesOpenAI {
-                VStack(alignment: .leading, spacing: 6) {
-                    SecureField(hasOpenAIKey ? "Replace OpenAI API key" : "OpenAI API key", text: $draftKey)
-                        .textFieldStyle(.plain)
-                        .padding(8)
-                        .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 6))
-                    HStack {
-                        Button("Save Key") {
-                            let key = draftKey
-                            changeKey(saved: true) { try OpenAISummaryKey.save(key) }
-                        }
-                        .disabled(draftKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        if hasOpenAIKey {
-                            Button("Remove Key") { changeKey(saved: false, action: OpenAISummaryKey.remove) }
-                        }
-                    }
-                }
-                .disabled(isChangingKey)
-                if let keyError {
-                    Text(keyError).font(.caption).foregroundStyle(.red)
-                } else if hasOpenAIKey {
-                    Label("API key saved in Keychain", systemImage: "checkmark.circle")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Text("OpenAI receives the transcript, prompt, and meeting details when you request a summary. Meeting details may include calendar descriptions and invitee names. API usage is billed separately from ChatGPT.")
-                    .font(.caption).foregroundStyle(.secondary)
-            } else {
-                AppleIntelligenceAvailability()
-            }
-
-            Divider().padding(.vertical, 4)
-
-            SummaryPromptSettings()
-        }
-        .onDisappear { draftKey = "" }
-        .onChange(of: model.usesOpenAI) { _, usesOpenAI in
-            if !usesOpenAI { draftKey = "" }
-        }
-    }
-
-    private func changeKey(saved: Bool, action: @escaping @Sendable () throws -> Void) {
-        isChangingKey = true
-        keyError = nil
-        Task {
-            defer { isChangingKey = false }
-            do {
-                try await Task.detached(operation: action).value
-                hasOpenAIKey = saved
-                draftKey = ""
-            } catch {
-                keyError = error.localizedDescription
-            }
-        }
-    }
-}
-
-private struct AppleIntelligenceAvailability: View {
+struct AppleIntelligenceAvailability: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var availability: MeetingSummarizer.Availability?
 
     var body: some View {
         Group {
             if let availability {
-                Text(availability.message ?? "Available on this Mac.")
-                    .font(.caption).foregroundStyle(.secondary)
+                SettingsNote(availability.message ?? "Apple Intelligence is available on this Mac.")
             }
         }
         .task(id: scenePhase) {
@@ -356,3 +300,43 @@ private struct AppleIntelligenceAvailability: View {
     }
 }
 
+
+struct SettingsHeading: View {
+    private let title: LocalizedStringKey
+    init(_ title: LocalizedStringKey) { self.title = title }
+
+    var body: some View {
+        Text(title).font(.headline).accessibilityAddTraits(.isHeader)
+    }
+}
+
+struct SettingsNote: View {
+    private let message: String
+    init(_ message: String) { self.message = message }
+
+    var body: some View {
+        Text(message).font(.callout).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+struct SettingsPromptEditor: View {
+    @Binding var text: String
+    let label: LocalizedStringKey
+    let height: CGFloat
+
+    var body: some View {
+        TextEditor(text: $text)
+            .font(.body)
+            .scrollContentBackground(.hidden)
+            .padding(8)
+            .frame(maxWidth: .infinity)
+            .frame(height: height)
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8).strokeBorder(.secondary.opacity(0.35))
+                    .allowsHitTesting(false)
+            }
+            .accessibilityLabel(Text(label))
+    }
+}

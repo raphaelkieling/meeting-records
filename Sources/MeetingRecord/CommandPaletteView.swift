@@ -4,24 +4,38 @@ import SwiftUI
 struct CommandPaletteView: View {
     let meetings: [Meeting]
     let store: MeetingStore
+    let indexRevision: Int
     let commands: [PaletteCommand]
     let activate: (PaletteItem) -> Void
     let startChat: (String) -> Void
 
-    @Environment(\.dismiss) private var dismiss
+    let dismiss: () -> Void
     @State private var query = ""
     @State private var tags: [Tag] = []
     @State private var tagError: String?
+    @State private var transcriptMatches: [ChatEvidence] = []
+    @State private var searchedQuery = ""
+    @State private var transcriptError: String?
     @State private var selectedID: PaletteItem.ID?
 
+    private struct SearchKey: Equatable {
+        let question: String
+        let indexRevision: Int
+    }
+
     var body: some View {
-        let matches = PaletteItem.search(query, meetings: meetings, tags: tags, commands: commands)
         let question = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let items: [PaletteItem] = matches.isEmpty && !question.isEmpty
-            ? [.command(PaletteCommand(title: "Ask across all meetings: \(question)", icon: "bubble.left.and.bubble.right", keywords: []) {
+        let searching = !question.isEmpty && searchedQuery != question
+        let matches = PaletteItem.search(query, meetings: meetings, tags: tags, commands: commands)
+        let transcriptItems = searching ? [] : transcriptMatches.map(PaletteItem.transcript)
+        let chatCommand: [PaletteItem] = question.isEmpty ? [] :
+            [.command(PaletteCommand(title: "Ask across all meetings: \(question)", icon: "bubble.left.and.bubble.right", keywords: []) {
                 startChat(question)
             })]
-            : matches
+        let items = PaletteItem.Section.allCases.flatMap { section in
+            (Array(matches.filter { $0.section == section }.prefix(10)) + transcriptItems + chatCommand)
+                .filter { $0.section == section }
+        }
         let activeIndex = items.firstIndex { $0.id == selectedID } ?? items.startIndex
 
         VStack(spacing: 0) {
@@ -47,6 +61,18 @@ struct CommandPaletteView: View {
 
             Divider()
 
+            if searching {
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small).frame(width: 20)
+                        .accessibilityHidden(true)
+                    Text("Searching transcripts…")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 19)
+                .padding(.vertical, 8)
+            }
+
             if items.isEmpty {
                 Text("No matches").font(.callout).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity).padding(.vertical, 24)
@@ -54,6 +80,9 @@ struct CommandPaletteView: View {
                 results(items, selected: items[activeIndex].id)
             }
 
+            if let transcriptError, !searching, !question.isEmpty {
+                Text(transcriptError).font(.caption).foregroundStyle(.secondary).padding(8)
+            }
             if let tagError {
                 HStack {
                     Text("Could not load tags. \(tagError)")
@@ -80,6 +109,23 @@ struct CommandPaletteView: View {
         .tint(.meetingAccent)
         .onExitCommand { dismiss() }
         .task { await loadTags() }
+        .task(id: SearchKey(question: question, indexRevision: indexRevision)) {
+            transcriptMatches = []
+            transcriptError = nil
+            guard !question.isEmpty else { searchedQuery = ""; return }
+            do {
+                try await Task.sleep(for: .milliseconds(120))
+                let hits = try await store.findTranscriptPassages(question)
+                try Task.checkCancellation()
+                transcriptMatches = hits
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                transcriptError = "Could not search transcripts. \(error.localizedDescription)"
+            }
+            searchedQuery = question
+        }
     }
 
     private func results(_ items: [PaletteItem], selected: PaletteItem.ID) -> some View {
@@ -106,7 +152,11 @@ struct CommandPaletteView: View {
                 }
                 .padding(.horizontal, 8)
                 .padding(.bottom, 8)
+                .background(alignment: .topLeading) {
+                    MeetingScrollbar().frame(width: 0, height: 0).accessibilityHidden(true)
+                }
             }
+            .contentMargins(.vertical, 6, for: .scrollIndicators)
             .frame(height: min(324, CGFloat(items.count * 36 + sections.count * 30 + 8)))
             .onChange(of: selected) { _, id in proxy.scrollTo(id) }
         }
@@ -125,6 +175,12 @@ struct CommandPaletteView: View {
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: 180, alignment: .leading)
                             .layoutPriority(-1)
+                    }
+                case .transcript(let hit):
+                    resultIcon("waveform", color: .meetingAccent)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(hit.title) · \(hit.citation.timestamp)")
+                        Text(hit.body).font(.caption).foregroundStyle(.secondary)
                     }
                 case .tag(let tag):
                     resultIcon("tag", color: tag.color.swiftUIColor)
@@ -187,8 +243,8 @@ private struct PaletteQueryField: NSViewRepresentable {
 
     func makeNSView(context: Context) -> QueryField {
         let field = QueryField()
-        field.placeholderString = "Search meetings, tags, and commands"
-        field.setAccessibilityLabel("Search meetings, tags, and commands")
+        field.placeholderString = "Search meetings, transcripts, tags, and commands"
+        field.setAccessibilityLabel("Search meetings, transcripts, tags, and commands")
         field.font = .systemFont(ofSize: 18)
         field.isBordered = false
         field.drawsBackground = false

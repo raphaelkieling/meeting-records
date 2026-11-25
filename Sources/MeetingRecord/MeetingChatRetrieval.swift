@@ -20,9 +20,19 @@ struct ChatMeetingMatch: Codable, Sendable {
     let description: String?
     let tags: [String]
     let invitees: [String]
+    let summaryExcerpt: String?
 }
 
 enum MeetingChatRetrieval {
+    static let searchInstructions = """
+        For questions about what people said, discussed, decided, or agreed to do, check the transcript evidence.
+        Use searchMeetings to find candidates by title, date, or keywords in saved summaries. Use summary excerpts to identify likely meetings and useful transcript keywords.
+        Choose short topic keywords from the question and conversation context. Call searchTranscript with those keywords and any relevant meeting IDs to verify what happened.
+        If no meeting is established, use an empty meetingIDs list to search the full selected scope, even when searchMeetings returned no candidates.
+        If the transcript search is empty, retry with a shorter keyword, a likely wording variant, or a broader meeting scope within the user's selection.
+        Verify details from summaries against the transcript and cite transcript evidence for what happened. Use meeting metadata for facts such as titles, dates, and invitees.
+        """
+
     static func refresh(_ store: MeetingStore) async throws {
         for id in try await store.staleChatRecordings() {
             try Task.checkCancellation()
@@ -74,15 +84,10 @@ enum MeetingChatRetrieval {
     }
 
     static func terms(from text: String) -> [String] {
-        let common: Set<String> = [
-            "about", "and", "are", "com", "como", "con", "did", "dos", "das", "del", "ela", "eles", "for", "from",
-            "hay", "las", "los", "nas", "nos", "our", "para", "por", "qual", "que", "quem", "sobre",
-            "the", "their", "was", "what", "when", "who", "with", "you", "your"
-        ]
         var seen = Set<String>()
         return text.lowercased().split { !$0.isLetter && !$0.isNumber }
             .map(String.init)
-            .filter { $0.count >= 2 && $0.count <= 64 && !common.contains($0) && seen.insert($0).inserted }
+            .filter { $0.count >= 2 && $0.count <= 64 && seen.insert($0).inserted }
     }
 
     static func match(_ terms: [String]) -> String {

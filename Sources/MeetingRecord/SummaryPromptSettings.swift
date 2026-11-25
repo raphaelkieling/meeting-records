@@ -14,35 +14,39 @@ struct SummaryPromptSettings: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Summary Prompts").font(.subheadline.weight(.semibold))
+                SettingsHeading("Summary Prompts")
                 Spacer()
                 Button("Add Prompt…", systemImage: "plus") {
                     editing = SummaryPrompt(id: UUID().uuidString, name: "", text: "")
                 }
             }
-            Text("Choose a saved prompt when you generate a summary.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
             ForEach(prompts) { prompt in
-                HStack {
-                    Text(prompt.name).lineLimit(1)
-                    Spacer()
-                    Button { editing = prompt } label: { Image(systemName: "pencil") }
-                        .help("Edit Prompt")
-                        .accessibilityLabel("Edit \(prompt.name)")
-                    if prompt.builtIn == nil {
-                        Button(role: .destructive) { pendingRemoval = prompt } label: {
-                            Image(systemName: "trash")
+                HStack(spacing: 12) {
+                    Button { editing = prompt } label: {
+                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            Image(systemName: "doc.text").foregroundStyle(Color.meetingAccent)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(prompt.name).font(.body.weight(.medium))
+                                Text(prompt.text).font(.callout).foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                            Spacer(minLength: 8)
+                            Image(systemName: "pencil").foregroundStyle(.secondary)
                         }
-                        .help("Remove Prompt")
-                        .accessibilityLabel("Remove \(prompt.name)")
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Edit \(prompt.name)")
+                    if prompt.builtIn == nil {
+                        Button("Remove \(prompt.name)", systemImage: "trash", role: .destructive) {
+                            pendingRemoval = prompt
+                        }
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(.borderless)
                     }
                 }
-                .buttonStyle(.borderless)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(.background, in: RoundedRectangle(cornerRadius: 6))
+                .padding(12)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
             }
 
             if let saveError {
@@ -108,26 +112,19 @@ private struct SummaryPromptEditSheet: View {
             Text(existing.contains { $0.id == draft.id } ? "Edit Summary Prompt" : "Add Summary Prompt")
                 .font(.headline)
             if draft.builtIn == nil {
-                TextField("Name", text: $draft.name)
+                TextField("Name", text: $draft.name).textFieldStyle(.roundedBorder)
             } else {
-                Text(draft.name).font(.subheadline.weight(.medium))
+                Text(draft.name).font(.body.weight(.medium))
             }
             HStack {
-                Text("Prompt").font(.subheadline.weight(.medium))
+                SettingsHeading("Prompt")
                 Spacer()
                 if let original = draft.builtIn {
                     Button("Reset to Default") { draft.text = original.text }
                         .disabled(draft.text == original.text)
                 }
             }
-            TextEditor(text: $draft.text)
-                .font(.body)
-                .scrollContentBackground(.hidden)
-                .padding(6)
-                .background(.background, in: RoundedRectangle(cornerRadius: 8))
-                .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary).allowsHitTesting(false) }
-                .frame(height: 156)
-                .accessibilityLabel("Prompt")
+            SettingsPromptEditor(text: $draft.text, label: "Prompt", height: 250)
             if duplicate {
                 Text("A prompt with this name already exists.")
                     .font(.caption).foregroundStyle(.red)
@@ -145,6 +142,6 @@ private struct SummaryPromptEditSheet: View {
             }
         }
         .padding(22)
-        .frame(width: 480)
+        .frame(width: 580)
     }
 }

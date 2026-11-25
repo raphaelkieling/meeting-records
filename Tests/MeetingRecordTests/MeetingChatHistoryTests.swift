@@ -32,4 +32,28 @@ final class MeetingChatHistoryTests: XCTestCase {
         let final = try await restarted.loadChatHistory()
         XCTAssertTrue(final.isEmpty)
     }
+    func testRetryReplacesReplyAndRejectsLateWritesFromTheFirstAttempt() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MeetingStore(databaseURL: directory.appendingPathComponent("meetings.sqlite"))
+        let source = try await store.createMeeting(id: UUID(), name: "Pilot")
+        let user = ChatMessage(role: .user, body: "What happened?", status: .complete)
+        var failed = ChatMessage(role: .assistant, body: "Partial", status: .failed, requestID: UUID())
+        failed.sourceIDs = [source.id]
+        let original = ChatConversation(title: user.body, messages: [user, failed])
+        try await store.saveChat(original, changed: 2, create: true)
+
+        var retried = original
+        retried.messages[1] = ChatMessage(id: failed.id, role: .assistant, status: .pending, requestID: UUID())
+        try await store.saveChat(retried, changed: 1, create: false, retrying: true)
+        try await store.saveChat(original, changed: 1, create: false)
+        retried.messages[1].body = "New answer"
+        retried.messages[1].status = .complete
+        try await store.saveChat(retried, changed: 1, create: false)
+
+        let history = try await store.loadChatHistory()
+        XCTAssertEqual(history.first?.messages.map(\.body), [user.body, "New answer"])
+        XCTAssertEqual(history.first?.messages.last?.requestID, retried.messages[1].requestID)
+        XCTAssertEqual(history.first?.messages.last?.sourceIDs, [])
+    }
 }

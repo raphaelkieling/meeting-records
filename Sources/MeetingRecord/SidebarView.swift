@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct SidebarView: View {
@@ -17,7 +18,8 @@ struct SidebarView: View {
     let save: () -> Void
     let cancel: () -> Void
     let retry: () -> Void
-    @FocusState private var focusedDestination: Destination?
+    private enum FocusTarget: Hashable { case destination(Destination), search }
+    @FocusState private var focusedDestination: FocusTarget?
     @State private var hasMoreMeetingsBelow = false
 
     var body: some View {
@@ -30,10 +32,15 @@ struct SidebarView: View {
                     Text("⌘K").font(.caption).foregroundStyle(.secondary).accessibilityHidden(true)
                 }
                 .padding(.horizontal, 8).padding(.vertical, 6)
+                .background(focusedDestination == .search && editor == nil ? Color.primary.opacity(0.08) : .clear,
+                            in: RoundedRectangle(cornerRadius: 6))
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("Search meetings, tags, and commands")
+            .focusable()
+            .focused($focusedDestination, equals: .search)
+            .onKeyPress(.return) { openSearch(); return .handled }
+            .help("Search meetings, transcripts, tags, and commands")
             navigationButton("Chat", icon: "bubble.left.and.bubble.right", target: .chat)
             navigationButton("Labels", icon: "tag", target: .labels)
             navigationButton("Calendar", icon: "calendar", target: .calendar)
@@ -87,7 +94,7 @@ struct SidebarView: View {
                         }
                     }
                     .onChange(of: focusedDestination) { _, target in
-                        if let target { proxy.scrollTo(target) }
+                        if case .destination(let target) = target { proxy.scrollTo(target) }
                     }
                     .onChange(of: revealVersion) { _, _ in
                         if let revealID { proxy.scrollTo(Destination.meeting(revealID)) }
@@ -102,13 +109,15 @@ struct SidebarView: View {
         .padding(.top, 0)
         .frame(maxHeight: .infinity)
         .background(.background.secondary)
-        .onAppear { focusedDestination = .home }
+        .onAppear { focusedDestination = .destination(.home) }
         .onMoveCommand { direction in
             guard editor == nil else { return }
             let meetings: [Meeting]
             if case .loaded(let values) = state { meetings = values } else { meetings = [] }
-            let targets: [Destination] = [.home, .chat, .labels, .calendar, .settings] + meetings.map { .meeting($0.id) }
-            let index = targets.firstIndex(of: focusedDestination ?? .home) ?? 0
+            let targets: [FocusTarget] = [.destination(.home), .search, .destination(.chat),
+                .destination(.labels), .destination(.calendar), .destination(.settings)] +
+                meetings.map { .destination(.meeting($0.id)) }
+            let index = targets.firstIndex(of: focusedDestination ?? .destination(.home)) ?? 0
             switch direction {
             case .down: focusedDestination = targets[min(index + 1, targets.count - 1)]
             case .up: focusedDestination = targets[max(index - 1, 0)]
@@ -148,29 +157,30 @@ struct SidebarView: View {
         .contentShape(Rectangle())
         .onTapGesture {
             if editor?.id != meeting.id {
-                if editor == nil { focusedDestination = target }
+                if editor == nil { focusedDestination = .destination(target) }
                 navigate(target)
             }
         }
         .focusable(editor == nil)
-        .focused($focusedDestination, equals: target)
+        .focused($focusedDestination, equals: .destination(target))
         .onKeyPress(.return) { guard editor == nil else { return .ignored }; navigate(target); return .handled }
         .onKeyPress(.space) { guard editor == nil else { return .ignored }; navigate(target); return .handled }
         .focusedValue(\.renameMeeting, editor == nil && !isSaving ? { rename(meeting.id) } : nil)
+        .help(meeting.name)
         .contextMenu { meetingActions(meeting) }
         .accessibilityElement(children: editor?.id == meeting.id ? .contain : .combine)
         .accessibilityLabel(editor?.id == meeting.id ? "" : meeting.name)
         .accessibilityValue(accessibilityValue(for: meeting, isRecording: isRecording))
         .accessibilityAddTraits(destination == target ? [.isSelected] : [])
         .accessibilityAction {
-            if editor == nil { focusedDestination = target }
+            if editor == nil { focusedDestination = .destination(target) }
             navigate(target)
         }
         .accessibilityAction(named: Text("Rename")) { rename(meeting.id) }
         .accessibilityAction(named: Text("Edit Meeting")) { meetingActions(meeting).edit() }
         .accessibilityAction(named: Text("Copy Link as Markdown")) { meetingActions(meeting).copyLink() }
         .onChange(of: editor == nil) { wasClosed, isClosed in
-            if !wasClosed && isClosed && destination == target { focusedDestination = target }
+            if !wasClosed && isClosed && destination == target { focusedDestination = .destination(target) }
         }
     }
 
@@ -194,7 +204,7 @@ struct SidebarView: View {
         }
         .buttonStyle(.plain)
         .focusable()
-        .focused($focusedDestination, equals: target)
+        .focused($focusedDestination, equals: .destination(target))
         .onKeyPress(.return) { navigate(target); return .handled }
         .help(title)
         .accessibilityAddTraits(isSelected(target) ? .isSelected : [])
@@ -207,7 +217,29 @@ struct SidebarView: View {
 
     private func rowBackground(for target: Destination) -> Color {
         if isSelected(target) { return Color.accentColor.opacity(0.16) }
-        if focusedDestination == target && editor == nil { return Color.primary.opacity(0.08) }
+        if focusedDestination == .destination(target) && editor == nil { return Color.primary.opacity(0.08) }
         return .clear
+    }
+}
+
+struct SidebarSplitAutosave: NSViewRepresentable {
+    func makeNSView(context: Context) -> SplitObserver { SplitObserver() }
+    func updateNSView(_ view: SplitObserver, context: Context) {}
+
+    final class SplitObserver: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard window != nil else { return }
+            DispatchQueue.main.async { [weak self] in
+                var ancestor = self?.superview
+                while let view = ancestor {
+                    if let split = view as? NSSplitView {
+                        split.autosaveName = "MeetingRecord.MainSplit"
+                        return
+                    }
+                    ancestor = view.superview
+                }
+            }
+        }
     }
 }
