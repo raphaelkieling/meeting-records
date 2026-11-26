@@ -358,6 +358,10 @@ struct SidebarView: View {
                 .buttonStyle(.plain)
                 .focusable()
                 .focused($focusedDestination, equals: target)
+                .onKeyPress(.return) {
+                    toggleFolder(item.id)
+                    return .handled
+                }
                 .accessibilityValue(folder.expanded ? "Expanded" : "Collapsed")
                 .contextMenu {
                     Button("Rename Folder", systemImage: "pencil") { beginFolderRename(item.id, name: folder.name) }

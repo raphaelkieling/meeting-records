@@ -23,6 +23,10 @@ Build and open the app:
 ./run
 ```
 
+To keep macOS privacy permissions across rebuilds, sign with the same code-signing identity each time. The build automatically uses an Apple Development or Developer ID Application identity if exactly one is available. If there are several, run `security find-identity -v -p codesigning` and save the desired identity's fingerprint as a single line in `.build/signing-identity`. The `MEETING_RECORD_SIGNING_IDENTITY` environment variable takes precedence.
+
+Without a signing identity, the build uses ad hoc signing and macOS can request permissions again after code changes. Create an Apple Development certificate under Xcode → Settings → Accounts → Manage Certificates if you need an identity. macOS can ask you to grant permissions again the first time you launch the app with the new signature.
+
 To change the app icon, replace [Resources/AppIcon.png](Resources/AppIcon.png) with a square PNG (at least 1024 × 1024 pixels) and run `./run` again. The build generates the macOS icon, and Settings uses the icon from the app bundle.
 
 Run `./scripts/build-dmg.sh` from a logged-in macOS desktop session to build `.build/MeetingRecord.dmg`. Open the disk image and drag **Meeting Record** into **Applications**. The disk image uses the local build signature. Its Finder background is in [Resources/DMGBackground.png](Resources/DMGBackground.png).

@@ -56,9 +56,14 @@ final class RecordingMenuBar: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         menu.addItem(withTitle: title, action: nil, keyEquivalent: "")
         if canStop {
+            menu.addItem(withTitle: "Take Screenshot", action: #selector(takeScreenshot), keyEquivalent: "").target = self
             menu.addItem(withTitle: "Stop Recording", action: #selector(stopRecording), keyEquivalent: "").target = self
         }
         item.menu = menu
+    }
+
+    @objc private func takeScreenshot() {
+        recording.takeScreenCapture()
     }
 
     @objc private func stopRecording() {

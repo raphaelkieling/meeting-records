@@ -1,5 +1,6 @@
 @preconcurrency import AVFoundation
 import CoreGraphics
+import OSLog
 @preconcurrency import ScreenCaptureKit
 
 /// Capture retains each sample until the serial storage consumer copies its PCM data.
@@ -7,14 +8,18 @@ struct CapturedAudio: @unchecked Sendable {
     let buffer: CMSampleBuffer
     let source: AudioSegment.Source
     let startOffset: Int64
+    let enqueuedAt = ContinuousClock.now
 }
 
 final class RecordingCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+    static let diagnostics = Logger(subsystem: "com.meetingrecord.app", category: "Recording")
+    private static let bufferLimit = 64
     private let queue = DispatchQueue(label: "MeetingRecord.capture", qos: .userInitiated)
     private let microphone = AVCaptureSession()
     private let hostClock = CMClockGetHostTimeClock()
     private let origin = CMClockGetTime(CMClockGetHostTimeClock())
     private let continuation: AsyncThrowingStream<CapturedAudio, any Error>.Continuation
+    private let recordingID: UUID?
     let samples: AsyncThrowingStream<CapturedAudio, any Error>
     // Start and stop are serialized by RecordingCoordinator.
     private var stream: SCStream?
@@ -34,8 +39,9 @@ final class RecordingCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDele
     private var levelChanged: (@Sendable (Double) -> Void)?
     private var microphoneObservers: [any NSObjectProtocol] = []
 
-    override init() {
-        (samples, continuation) = AsyncThrowingStream.makeStream(bufferingPolicy: .bufferingOldest(64))
+    init(recordingID: UUID? = nil) {
+        self.recordingID = recordingID
+        (samples, continuation) = AsyncThrowingStream.makeStream(bufferingPolicy: .bufferingOldest(Self.bufferLimit))
         super.init()
     }
 
@@ -174,7 +180,11 @@ final class RecordingCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDele
             continuation.finish(throwing: RecordingError.invalidAudio)
             return
         }
-        if case .dropped = continuation.yield(CapturedAudio(buffer: buffer, source: source, startOffset: max(0, offset.value))) {
+        let sample = CapturedAudio(buffer: buffer, source: source, startOffset: max(0, offset.value))
+        if case .dropped = continuation.yield(sample) {
+            if let recordingID {
+                Self.diagnostics.error("Audio queue overflow recording=\(recordingID.uuidString, privacy: .public) source=\(source.rawValue, privacy: .public) capacity=\(Self.bufferLimit) elapsedMs=\(self.currentTimelineOffset / 1_000_000) frames=\(buffer.numSamples)")
+            }
             continuation.finish(throwing: RecordingError.captureOverrun)
         }
     }

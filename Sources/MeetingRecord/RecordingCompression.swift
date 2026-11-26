@@ -1,5 +1,6 @@
 import AVFoundation
 import Combine
+import Darwin
 import Foundation
 
 enum RecordingCompression {
@@ -88,8 +89,9 @@ enum RecordingCompression {
     }
 
     private static func removeIfPresent(_ url: URL) throws {
-        do { try FileManager.default.removeItem(at: url) }
-        catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile {}
+        guard Darwin.unlink(url.path) != 0 else { return }
+        let code = errno
+        if code != ENOENT { throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO) }
     }
 
     private static func encode(_ source: URL, destination: URL, frames: Int64) async throws
@@ -160,6 +162,7 @@ final class RecordingCompressionCoordinator: ObservableObject {
     @Published private(set) var result: String?
     @Published private(set) var revision = 0
     private var worker: Task<Void, Never>?
+    private var captureInProgress = false
     private var requestedManual = false
     private var requestedAutomatic = false
     private var automaticStart: Date?
@@ -197,6 +200,19 @@ final class RecordingCompressionCoordinator: ObservableObject {
         startWorker()
     }
 
+    func pauseForCapture() async {
+        captureInProgress = true
+        guard let worker else { return }
+        worker.cancel()
+        await worker.value
+    }
+
+    func resumeAfterCapture() {
+        captureInProgress = false
+        enqueueAutomatic()
+        if requestedManual { startWorker() }
+    }
+
     func recover() async {
         do {
             guard try await !store.pendingUncompressedAudio().isEmpty else { return }
@@ -212,7 +228,7 @@ final class RecordingCompressionCoordinator: ObservableObject {
     }
 
     private func startWorker() {
-        guard worker == nil else { return }
+        guard !captureInProgress, worker == nil else { return }
         result = nil
         progress = "Checking recordings…"
         worker = Task(priority: .utility) { [weak self] in await self?.processQueue() }
@@ -223,14 +239,20 @@ final class RecordingCompressionCoordinator: ObservableObject {
             worker = nil
             progress = nil
         }
+        var interruptedManual = false
+        var interruptedAutomatic = false
         do {
             let root = try await store.recordingRoot()
+            try Task.checkCancellation()
             let lock = try RecordingFileLock(root: root.appendingPathComponent(".compression", isDirectory: true))
             defer { withExtendedLifetime(lock) {} }
             try await RecordingCompression.cleanOriginals(store: store, root: root)
             revision += 1
             while requestedManual || requestedAutomatic {
+                try Task.checkCancellation()
                 let manual = requestedManual
+                interruptedManual = manual
+                interruptedAutomatic = requestedAutomatic
                 requestedManual = false
                 requestedAutomatic = false
                 guard manual || automaticEnabled else { continue }
@@ -239,6 +261,7 @@ final class RecordingCompressionCoordinator: ObservableObject {
                 var failures = 0
                 var lastError: String?
                 for (index, id) in candidates.enumerated() {
+                    try Task.checkCancellation()
                     guard manual || automaticEnabled else { break }
                     progress = "Compacting recording \(index + 1) of \(candidates.count)…"
                     do {
@@ -246,6 +269,7 @@ final class RecordingCompressionCoordinator: ObservableObject {
                         count += 1
                         revision += 1
                     } catch {
+                        try Task.checkCancellation()
                         failures += 1
                         lastError = error.localizedDescription
                     }
@@ -257,7 +281,12 @@ final class RecordingCompressionCoordinator: ObservableObject {
                 } else if manual {
                     result = "No transcribed recordings to compact."
                 }
+                interruptedManual = false
+                interruptedAutomatic = false
             }
+        } catch is CancellationError {
+            requestedManual = requestedManual || interruptedManual
+            requestedAutomatic = requestedAutomatic || interruptedAutomatic
         } catch {
             requestedManual = false
             requestedAutomatic = false

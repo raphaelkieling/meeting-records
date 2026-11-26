@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import os
 
 @MainActor
 final class RecordingCoordinator: ObservableObject {
@@ -19,6 +20,7 @@ final class RecordingCoordinator: ObservableObject {
         let capture: RecordingCapture
         let storage: RecordingStorage
         let consumer: Task<Void, any Error>
+        let meters: Task<Void, Never>
         let lock: RecordingFileLock
     }
 
@@ -109,7 +111,6 @@ final class RecordingCoordinator: ObservableObject {
         revision += 1
     }
 
-    private var autoStop: RecordingAutoStop?
     private var autoStopMonitor: Task<Void, Never>?
     private var checkedRecovery = false
     @Published private(set) var microphoneID = UserDefaults.standard.string(forKey: "selectedMicrophoneID") ?? ""
@@ -254,6 +255,7 @@ final class RecordingCoordinator: ObservableObject {
     }
 
     private func start(meetingID: UUID) async {
+        await compression.pauseForCapture()
         do {
             try await RecordingCapture.authorize()
             let root = try await store.recordingRoot()
@@ -264,39 +266,63 @@ final class RecordingCoordinator: ObservableObject {
             let scheduledEnd = try? await store.scheduledEnd(for: meetingID)
             let recording = Recording(id: UUID(), meetingID: meetingID, startedAt: Date(), endedAt: nil, state: .starting)
             try await store.beginRecording(recording)
-            let capture = RecordingCapture()
-            do {
-                try await capture.start(microphoneID: microphoneID)
-                try await store.markRecordingStarted(recording.id)
-            } catch {
-                try? await capture.stop()
-                _ = try? await store.finalizeRecording(recording.id, endedAt: Date(), interrupted: true)
-                withExtendedLifetime(lock) {}
-                throw error
-            }
-
+            let capture = RecordingCapture(recordingID: recording.id)
             let storage = RecordingStorage(store: store, root: root, recording: recording,
                                            checkpointPublished: transcription.checkpointPublished)
-            autoStop = RecordingAutoStop(scheduledEnd: scheduledEnd)
-            let consumer = Task { [weak self] in
+            let autoStop = OSAllocatedUnfairLock(initialState: RecordingAutoStop(scheduledEnd: scheduledEnd))
+            let (meterUpdates, meterContinuation) = AsyncStream<(peak: Double, rms: Double)>.makeStream(
+                bufferingPolicy: .bufferingNewest(1)
+            )
+            let consumer = Task.detached(priority: .userInitiated) {
+                defer { meterContinuation.finish() }
                 var lastUpdate = ContinuousClock.now
+                var lastDelayLog: ContinuousClock.Instant?
                 var peak = 0.0
                 var rms = 0.0
                 for try await sample in capture.samples {
+                    let dequeuedAt = ContinuousClock.now
                     let input = try await storage.append(sample)
                     peak = max(peak, input.peak)
                     if sample.source == .me { rms = input.rms }
                     let now = ContinuousClock.now
-                    self?.autoStop?.observeAudio(rms: input.rms, isMicrophone: sample.source == .me, at: now)
+                    let queueDelay = sample.enqueuedAt.duration(to: dequeuedAt)
+                    let appendDelay = dequeuedAt.duration(to: now)
+                    if (queueDelay >= .milliseconds(250) || appendDelay >= .milliseconds(250)),
+                       lastDelayLog.map({ $0.duration(to: now) >= .seconds(1) }) ?? true {
+                        RecordingCapture.diagnostics.notice("Audio processing delay recording=\(recording.id.uuidString, privacy: .public) source=\(sample.source.rawValue, privacy: .public) queue=\(queueDelay.description, privacy: .public) appendRoundTrip=\(appendDelay.description, privacy: .public)")
+                        lastDelayLog = now
+                    }
+                    autoStop.withLock {
+                        $0.observeAudio(rms: input.rms, isMicrophone: sample.source == .me, at: now)
+                    }
                     if lastUpdate.duration(to: now) >= .milliseconds(75) {
-                        self?.levels.send(peak)
-                        self?.microphoneRMS.send(rms)
+                        meterContinuation.yield((peak, rms))
                         lastUpdate = now
                         peak = 0
                     }
                 }
             }
-            session = Session(recording: recording, capture: capture, storage: storage, consumer: consumer, lock: lock)
+            do {
+                try await capture.start(microphoneID: microphoneID)
+                try await store.markRecordingStarted(recording.id)
+            } catch {
+                consumer.cancel()
+                try? await capture.stop()
+                _ = await consumer.result
+                try? await storage.finish()
+                _ = try? await store.finalizeRecording(recording.id, endedAt: Date(), interrupted: true)
+                withExtendedLifetime(lock) {}
+                throw error
+            }
+
+            let meters = Task { [weak self] in
+                for await update in meterUpdates {
+                    self?.levels.send(update.peak)
+                    self?.microphoneRMS.send(update.rms)
+                }
+            }
+            session = Session(recording: recording, capture: capture, storage: storage,
+                              consumer: consumer, meters: meters, lock: lock)
             state = .recording(meetingID)
             scheduleScreenCaptures()
             revision += 1
@@ -304,7 +330,10 @@ final class RecordingCoordinator: ObservableObject {
                 while !Task.isCancelled {
                     guard let self, self.state == .recording(meetingID) else { return }
                     let externalInput = RecordingAutoStop.externalInputRunning()
-                    if self.autoStop?.shouldStop(externalInputRunning: externalInput, at: .now, date: .now) == true {
+                    let shouldStop = autoStop.withLock {
+                        $0.shouldStop(externalInputRunning: externalInput, at: .now, date: .now)
+                    }
+                    if shouldStop {
                         self.stop()
                         return
                     }
@@ -319,6 +348,7 @@ final class RecordingCoordinator: ObservableObject {
                 }
             }
         } catch {
+            compression.resumeAfterCapture()
             self.error = "Could not start recording. \(error.localizedDescription)"
             state = .idle
             await startMicrophoneMeterIfNeeded()
@@ -332,7 +362,7 @@ final class RecordingCoordinator: ObservableObject {
         manualScreenCapture?.cancel()
         autoStopMonitor?.cancel()
         autoStopMonitor = nil
-        autoStop = nil
+        session.meters.cancel()
         var failure = cause
         var discarded = false
         do { try await session.capture.stop() }
@@ -350,6 +380,7 @@ final class RecordingCoordinator: ObservableObject {
         }
         if let failure { error = "Recording ended. \(failure.localizedDescription)" }
         self.session = nil
+        compression.resumeAfterCapture()
         levels.send(0)
         microphoneRMS.send(0)
         revision += 1

@@ -16,6 +16,18 @@ if [[ "$configuration" == release ]]; then
   debug_info=none
 fi
 bundle=.build/MeetingRecord.app
+signing_identity="${MEETING_RECORD_SIGNING_IDENTITY:-}"
+if [[ -z "$signing_identity" && -s .build/signing-identity ]]; then
+  signing_identity=$(cat .build/signing-identity)
+fi
+if [[ -z "$signing_identity" ]]; then
+  signing_identity=$(security find-identity -v -p codesigning |
+    awk '/"Apple Development:|"Developer ID Application:/ { identity = $2; count++ } END { if (count == 1) print identity }')
+fi
+if [[ -z "$signing_identity" ]]; then
+  signing_identity=-
+  echo 'Using ad hoc signing. macOS may ask for privacy permissions again after a rebuild.' >&2
+fi
 # Remove stale output before building so a failure cannot look like a fresh app.
 rm -rf "$bundle"
 xcrun swift build --disable-sandbox --cache-path .build/cache --manifest-cache local -c "$configuration" -debug-info-format "$debug_info"
@@ -28,7 +40,7 @@ cp "$bin_path/MeetingRecord" "$staging/Contents/MacOS/MeetingRecord"
 mkdir -p "$staging/Contents/Frameworks"
 cp -R "$bin_path/CTranscribe.framework" "$staging/Contents/Frameworks/"
 install_name_tool -add_rpath @executable_path/../Frameworks "$staging/Contents/MacOS/MeetingRecord"
-codesign --force --sign - "$staging/Contents/Frameworks/CTranscribe.framework"
+codesign --force --sign "$signing_identity" "$staging/Contents/Frameworks/CTranscribe.framework"
 mkdir -p "$staging/Contents/Resources"
 iconset="$staging/AppIcon.iconset"
 mkdir "$iconset"
@@ -37,7 +49,10 @@ for size in 16 32 128 256 512; do
   retina_size=$((size * 2))
   sips -z "$retina_size" "$retina_size" Resources/AppIcon.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
-iconutil -c icns "$iconset" -o "$staging/Contents/Resources/AppIcon.icns"
+icon="$staging/Contents/Resources/AppIcon.icns"
+if ! iconutil -c icns "$iconset" -o "$icon"; then
+  sips -z 512 512 -s format icns Resources/AppIcon.png --out "$icon" >/dev/null
+fi
 rm -r "$iconset"
 mkdir -p "$staging/Contents/Resources/CTranscribe-Licenses"
 cp .build/artifacts/*/CTranscribe/TranscribeCpp.xcframework/LICENSE* \
@@ -47,6 +62,7 @@ for resources in "$bin_path"/*.bundle; do
   cp -R "$resources" "$staging/Contents/Resources/"
 done
 plutil -lint "$staging/Contents/Info.plist"
-codesign --force --sign - --entitlements Resources/Recording.entitlements "$staging"
+codesign --force --sign "$signing_identity" --entitlements Resources/Recording.entitlements "$staging"
+codesign --verify --deep --strict "$staging"
 mv "$staging" "$bundle"
 echo "Built $bundle ($configuration)"

@@ -173,6 +173,7 @@ struct ContentView: View {
                                                   recordingRevision: recording.revision, transcription: transcription,
                                                   citedPassageID: citedPassageID,
                                                   citedPassageRevision: citationNavigationRevision,
+                                                  deleteScreenCapture: recording.deleteScreenCapture,
                                                   returnToChat: citationReplyID == nil ? nil : { request(.navigate(.chat)) })
                                     .id(meeting.id)
                             case .summary:
