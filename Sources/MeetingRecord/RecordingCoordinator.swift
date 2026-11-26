@@ -25,6 +25,7 @@ final class RecordingCoordinator: ObservableObject {
     let store: MeetingStore
     let transcription: TranscriptionCoordinator
     let summaries: MeetingSummaryCoordinator
+    let compression: RecordingCompressionCoordinator
     lazy var chat = MeetingChatCoordinator(store: store)
 
     init() {
@@ -32,6 +33,7 @@ final class RecordingCoordinator: ObservableObject {
         self.store = store
         self.transcription = TranscriptionCoordinator(store: store)
         self.summaries = MeetingSummaryCoordinator(store: store)
+        self.compression = RecordingCompressionCoordinator(store: store)
     }
     @Published private(set) var state = State.idle
     @Published private(set) var revision = 0

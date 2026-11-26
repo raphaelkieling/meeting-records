@@ -83,6 +83,7 @@ actor MeetingStore {
                 try check(sqlite3_bind_double(statement, 4, time.timeIntervalSince1970))
                 try check(sqlite3_bind_double(statement, 5, time.timeIntervalSince1970))
                 try finish(statement)
+                try insertSidebarItem(id: id, meetingID: id, name: nil, db: db)
                 if let calendarEventDate, let calendarName {
                     let source = try prepare("""
                         INSERT INTO calendar_meeting_inputs(meetingID, eventDate, calendarName, details)
@@ -262,6 +263,7 @@ actor MeetingStore {
                     try execute("DELETE FROM meetings WHERE upper(id) = ?", id: id, db: db)
                     try execute("INSERT INTO pending_meeting_deletions VALUES (?)", id: id, db: db)
                 }
+                try execute("DELETE FROM sidebar_items", db: db)
                 return ids
             }
         }
@@ -354,15 +356,15 @@ actor MeetingStore {
         let version = sqlite3_column_int(statement, 0)
         sqlite3_finalize(statement)
         guard step == SQLITE_ROW else { throw MeetingStoreError.sqlite(step) }
-        guard (0...12).contains(version) else { throw MeetingStoreError.incompatibleVersion }
+        guard (0...13).contains(version) else { throw MeetingStoreError.incompatibleVersion }
         return version
     }
 
     private func ensureSchema(db: OpaquePointer) throws {
-        guard try schemaVersion(db: db) < 12 else { return }
+        guard try schemaVersion(db: db) < 13 else { return }
         try transaction(db: db) {
             let version = try schemaVersion(db: db)
-            guard version < 12 else { return }
+            guard version < 13 else { return }
             if version < 3 {
                 if version == 0 {
                     try execute("""
@@ -465,6 +467,26 @@ actor MeetingStore {
                         meetingID TEXT NOT NULL
                     );
                     PRAGMA user_version = 12;
+                    """, db: db)
+            }
+            if version < 13 {
+                try execute("""
+                    CREATE TABLE sidebar_items (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        meetingID TEXT UNIQUE REFERENCES meetings(id) ON DELETE CASCADE,
+                        parentID TEXT REFERENCES sidebar_items(id),
+                        position INTEGER NOT NULL,
+                        name TEXT,
+                        color TEXT,
+                        expanded INTEGER NOT NULL DEFAULT 1,
+                        CHECK ((meetingID IS NULL AND name IS NOT NULL) OR
+                               (meetingID IS NOT NULL AND name IS NULL AND color IS NULL))
+                    );
+                    CREATE INDEX sidebar_items_order ON sidebar_items(parentID, position, id);
+                    INSERT INTO sidebar_items(id, meetingID, position)
+                        SELECT upper(id), id, row_number() OVER (ORDER BY updatedAt DESC, upper(id)) FROM meetings;
+                    CREATE TABLE pending_uncompressed_audio (relativePath TEXT PRIMARY KEY NOT NULL);
+                    PRAGMA user_version = 13;
                     """, db: db)
             }
         }
@@ -1023,15 +1045,26 @@ extension MeetingStore {
         try withDatabase { try readTranscriptPassages(for: meetingID, db: $0) }
     }
 
-    private func readTranscriptPassages(for meetingID: UUID, db: OpaquePointer) throws -> [TranscriptPassage] {
+    private func readTranscriptPassages(for meetingID: UUID,
+                                        recordingID: UUID? = nil,
+                                        window: ClosedRange<Int64>? = nil,
+                                        db: OpaquePointer) throws -> [TranscriptPassage] {
         let statement = try prepare("""
             SELECT s.inputID, s.source, s.checkpoint, s.sequence, s.startOffset, s.endOffset, s.text
             FROM transcript_segments s JOIN recordings r ON r.id = s.inputID
             WHERE upper(r.meetingID) = ?
+              AND (?2 IS NULL OR r.id = ?2)
+              AND (?3 IS NULL OR s.endOffset >= ?3)
+              AND (?4 IS NULL OR s.startOffset <= ?4)
             ORDER BY r.startedAt, r.id, s.startOffset, s.source, s.checkpoint, s.sequence
             """, db: db)
         defer { sqlite3_finalize(statement) }
         try bind(meetingID.uuidString, at: 1, to: statement)
+        if let recordingID { try bind(recordingID.uuidString, at: 2, to: statement) }
+        if let window {
+            try check(sqlite3_bind_int64(statement, 3, window.lowerBound))
+            try check(sqlite3_bind_int64(statement, 4, window.upperBound))
+        }
         var passages: [TranscriptPassage] = []
         while true {
             let result = sqlite3_step(statement)
@@ -1569,6 +1602,39 @@ extension MeetingStore {
         }
     }
 
+    func chatTranscriptContext(around match: ChatEvidence, secondsBefore: Int, secondsAfter: Int,
+                               byteLimit: Int) throws -> [ChatEvidence] {
+        let anchor = match.citation
+        guard anchor.screenCaptureID == nil, try isChatCitationCurrent(anchor) else { return [] }
+        let before = Int64(min(180, max(0, secondsBefore))) * 1_000_000_000
+        let after = Int64(min(180, max(0, secondsAfter))) * 1_000_000_000
+        let end = max(anchor.startOffset, match.endOffset ?? anchor.startOffset)
+        let window = max(0, anchor.startOffset - before)...(min(end, Int64.max - after) + after)
+        let passages = try withDatabase { db in
+            try readTranscriptPassages(for: anchor.meetingID, recordingID: anchor.recordingID, window: window, db: db)
+        }
+        let chunks = MeetingChatRetrieval.chunks(from: passages)
+        // Keep the context nearest the match if the full window exceeds the tool budget.
+        func distance(_ chunk: TranscriptChunk) -> Int64 {
+            max(anchor.startOffset - chunk.endOffset, chunk.startOffset - end, 0)
+        }
+        var remaining = byteLimit
+        var selected: [Int] = []
+        for index in chunks.indices.sorted(by: { distance(chunks[$0]) < distance(chunks[$1]) }) {
+            let bytes = chunks[index].body.utf8.count
+            guard bytes <= remaining else { break }
+            remaining -= bytes
+            selected.append(index)
+        }
+        return selected.sorted().map { index in
+            let chunk = chunks[index]
+            return ChatEvidence(title: match.title, body: chunk.body,
+                citation: ChatCitation(meetingID: anchor.meetingID, recordingID: anchor.recordingID,
+                    passageIDs: chunk.passageIDs, startOffset: chunk.startOffset, revision: anchor.revision),
+                endOffset: chunk.endOffset)
+        }
+    }
+
     func findTranscriptPassages(_ query: String) throws -> [ChatEvidence] {
         let terms = query.split { !$0.isLetter && !$0.isNumber }.prefix(8).map(String.init)
         let match = terms.map { "\"\($0)\"*" }.joined(separator: " AND ")
@@ -1683,5 +1749,167 @@ extension MeetingStore {
             SELECT j.chatRevision FROM transcript_jobs j JOIN recordings r ON r.id = j.inputID
             WHERE r.id = ? AND r.endedAt IS NOT NULL AND j.status = 'Complete'
             """, [id.uuidString], db: db) { sqlite3_column_int64($0, 0) }.first
+    }
+}
+
+extension MeetingStore {
+    func sidebarItems() throws -> [SidebarItem] {
+        try withDatabase { db in
+            try chatRows("""
+                SELECT id, parentID, name, color, expanded FROM sidebar_items
+                ORDER BY parentID, position, id
+                """, db: db) { row in
+                guard let id = text(row, column: 0).flatMap(UUID.init(uuidString:)) else {
+                    throw MeetingStoreError.invalidRecord
+                }
+                let folder = text(row, column: 2).map { name in
+                    SidebarItem.Folder(name: name, color: text(row, column: 3).flatMap(TagColor.init(rawValue:)),
+                                       expanded: sqlite3_column_int(row, 4) != 0)
+                }
+                return SidebarItem(id: id, parentID: text(row, column: 1).flatMap(UUID.init(uuidString:)), folder: folder)
+            }
+        }
+    }
+
+    func createSidebarFolder(_ id: UUID) throws {
+        try withDatabase { db in
+            try transaction(db: db) {
+                try insertSidebarItem(id: id, meetingID: nil, name: "New Folder", db: db)
+            }
+        }
+    }
+
+    private func insertSidebarItem(id: UUID, meetingID: UUID?, name: String?, db: OpaquePointer) throws {
+        try chatWrite("""
+            INSERT INTO sidebar_items(id, meetingID, name, position)
+            VALUES (?, ?, ?, (SELECT coalesce(min(position), 0) - 1 FROM sidebar_items WHERE parentID IS NULL))
+            """, [id.uuidString, meetingID?.uuidString, name], db: db)
+    }
+
+    func renameSidebarFolder(_ id: UUID, name: String) throws {
+        let name = try Meeting.normalizedName(name)
+        try withDatabase { db in
+            try chatWrite("UPDATE sidebar_items SET name = ? WHERE id = ? AND meetingID IS NULL",
+                          [name, id.uuidString], db: db)
+        }
+    }
+
+    func setSidebarFolderColor(_ id: UUID, color: TagColor?) throws {
+        try withDatabase { db in
+            try chatWrite("UPDATE sidebar_items SET color = ? WHERE id = ? AND meetingID IS NULL",
+                          [color?.rawValue, id.uuidString], db: db)
+        }
+    }
+
+    func setSidebarFolderExpanded(_ id: UUID, expanded: Bool) throws {
+        try withDatabase { db in
+            try chatWrite("UPDATE sidebar_items SET expanded = ? WHERE id = ? AND meetingID IS NULL",
+                          [expanded ? "1" : "0", id.uuidString], db: db)
+        }
+    }
+
+    func moveSidebarItem(_ id: UUID, to parent: UUID?, before sibling: UUID?) throws {
+        try withDatabase { db in
+            try transaction(db: db) {
+                guard try exists("SELECT 1 FROM sidebar_items WHERE id = ?", id: id, db: db)
+                else { throw SidebarMoveError.invalidTarget }
+                if let parent {
+                    guard try exists("SELECT 1 FROM sidebar_items WHERE id = ? AND meetingID IS NULL", id: parent, db: db)
+                    else { throw SidebarMoveError.invalidTarget }
+                    let cycle = try chatRows("""
+                        WITH RECURSIVE ancestors(id, parentID) AS (
+                            SELECT id, parentID FROM sidebar_items WHERE id = ?
+                            UNION
+                            SELECT s.id, s.parentID FROM sidebar_items s JOIN ancestors a ON s.id = a.parentID
+                        ) SELECT 1 FROM ancestors WHERE id = ?
+                        """, [parent.uuidString, id.uuidString], db: db) { _ in true }
+                    guard cycle.isEmpty else { throw SidebarMoveError.nestingCycle }
+                }
+                guard sibling != id else { return }
+                var order = try chatRows("""
+                    SELECT id FROM sidebar_items WHERE parentID IS ? AND id != ? ORDER BY position, id
+                    """, [parent?.uuidString, id.uuidString], db: db) { row in
+                    guard let value = text(row, column: 0) else { throw MeetingStoreError.invalidRecord }
+                    return value
+                }
+                let index: Int
+                if let sibling {
+                    guard let target = order.firstIndex(of: sibling.uuidString) else { throw SidebarMoveError.invalidTarget }
+                    index = target
+                } else {
+                    index = order.count
+                }
+                order.insert(id.uuidString, at: index)
+                try chatWrite("UPDATE sidebar_items SET parentID = ? WHERE id = ?",
+                              [parent?.uuidString, id.uuidString], db: db)
+                let positions = try chatJSON(order)
+                try chatWrite("""
+                    WITH positions AS (SELECT value AS id, key AS position FROM json_each(?))
+                    UPDATE sidebar_items SET position = positions.position
+                    FROM positions WHERE sidebar_items.id = positions.id
+                    """, [positions], db: db)
+                if let parent {
+                    try execute("UPDATE sidebar_items SET expanded = 1 WHERE id = ?", id: parent, db: db)
+                }
+            }
+        }
+    }
+}
+
+extension MeetingStore {
+    func compressibleRecordings(endedAfter date: Date?) throws -> [UUID] {
+        try withDatabase { db in
+            try chatRows("""
+                SELECT r.id FROM recordings r JOIN transcript_jobs j ON j.inputID = r.id
+                WHERE j.status = 'Complete' AND r.endedAt IS NOT NULL
+                  AND (?1 IS NULL OR r.endedAt >= CAST(?1 AS REAL))
+                  AND EXISTS (SELECT 1 FROM audio_segments a WHERE a.recordingID = r.id
+                              AND a.relativePath LIKE '%.caf')
+                ORDER BY r.endedAt, r.id
+                """, [date.map { String($0.timeIntervalSince1970) }], db: db) { row in
+                guard let id = text(row, column: 0).flatMap(UUID.init(uuidString:)) else {
+                    throw MeetingStoreError.invalidRecord
+                }
+                return id
+            }
+        }
+    }
+
+    func replaceRecordingAudio(_ id: UUID, originals: [String], replacements: [String]) throws {
+        guard !originals.isEmpty, originals.count == replacements.count else {
+            throw MeetingStoreError.invalidRecord
+        }
+        try withDatabase { db in
+            try transaction(db: db) {
+                let eligible = try exists("""
+                    SELECT 1 FROM recordings r JOIN transcript_jobs j ON j.inputID = r.id
+                    WHERE r.id = ? AND r.endedAt IS NOT NULL AND j.status = 'Complete'
+                    """, id: id, db: db)
+                guard eligible else { throw MeetingStoreError.notFound }
+                for (original, replacement) in zip(originals, replacements) {
+                    try chatWrite("UPDATE audio_segments SET relativePath = ? WHERE recordingID = ? AND relativePath = ?",
+                                  [replacement, id.uuidString, original], db: db)
+                    guard sqlite3_changes(db) == 1 else { throw MeetingStoreError.notFound }
+                    try chatWrite("INSERT INTO pending_uncompressed_audio VALUES (?)", [original], db: db)
+                }
+            }
+        }
+    }
+
+    func pendingUncompressedAudio() throws -> [String] {
+        try withDatabase { db in
+            try chatRows("SELECT relativePath FROM pending_uncompressed_audio", db: db) { row in
+                guard let path = text(row, column: 0) else { throw MeetingStoreError.invalidRecord }
+                return path
+            }
+        }
+    }
+
+    func finishUncompressedAudioRemoval(_ paths: [String]) throws {
+        guard !paths.isEmpty else { return }
+        try withDatabase { db in
+            try chatWrite("DELETE FROM pending_uncompressed_audio WHERE relativePath IN (SELECT value FROM json_each(?))",
+                          [try chatJSON(paths)], db: db)
+        }
     }
 }

@@ -115,7 +115,7 @@ struct ContentView: View {
     var body: some View {
         HSplitView {
             SidebarView(
-                destination: destination, state: state, editor: $editor, isSaving: isSaving,
+                store: store, destination: destination, state: state, editor: $editor, isSaving: isSaving,
                 canCreate: canCreate, revealID: revealID, revealVersion: revealVersion,
                 recordingMeetingID: recordingMeetingID,
                 navigate: { request(.navigate($0)) }, create: { request(.create) },
@@ -211,6 +211,7 @@ struct ContentView: View {
                                         store: store, recordingRevision: recording.revision)
                     } else if destination == .settings {
                         SettingsView(section: $settingsSection, transcription: transcription, recording: recording,
+                                     compression: recording.compression,
                                      deleteAll: deleteAllMeetingData)
                     } else if case .label(let tag) = destination {
                         meetingsWithLabel(tag)
@@ -260,7 +261,9 @@ struct ContentView: View {
         }
         .task { await loadMeetings() }
         .task { await recording.recover() }
+        .task { await recording.compression.recover() }
         .task(id: transcription.completionRevision, priority: .utility) {
+            recording.compression.enqueueAutomatic()
             do {
                 try await MeetingChatRetrieval.refresh(store)
                 if !Task.isCancelled { searchIndexRevision &+= 1 }

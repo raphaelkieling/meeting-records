@@ -53,7 +53,7 @@ final class MeetingStoreTests: XCTestCase {
         let url = try temporaryURL()
         let meetings = try await MeetingStore(databaseURL: url).loadMeetings()
         XCTAssertTrue(meetings.isEmpty)
-        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 12)
+        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 13)
     }
 
     func testThirtyRecordsReopenUnicodeDuplicateNamesAndStableOrder() async throws {
@@ -92,6 +92,8 @@ final class MeetingStoreTests: XCTestCase {
             DROP TABLE pending_meeting_deletions;
             DROP TABLE calendar_meeting_inputs;
             DROP TABLE pending_recording_deletions;
+            DROP TABLE sidebar_items;
+            DROP TABLE pending_uncompressed_audio;
             PRAGMA user_version=4;
             """, at: url)
 
@@ -102,7 +104,7 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertEqual(summary.completedTranscriptions, 0)
         let all = try await reopened.loadMeetings()
         XCTAssertEqual(all.first?.name, "Renamed first")
-        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 12)
+        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 13)
     }
 
     func testTranscriptionWorkBatchesAdjacentCheckpointsPerSource() async throws {
@@ -206,6 +208,8 @@ final class MeetingStoreTests: XCTestCase {
         try execute("""
             ALTER TABLE calendar_meeting_inputs DROP COLUMN details;
             DROP TABLE pending_recording_deletions;
+            DROP TABLE sidebar_items;
+            DROP TABLE pending_uncompressed_audio;
             PRAGMA user_version=8;
             """, at: url)
 
@@ -213,7 +217,7 @@ final class MeetingStoreTests: XCTestCase {
         let snapshot = try await reopened.summarySnapshot(for: meeting.id)
         let scheduledEnd = try await reopened.scheduledEnd(for: meeting.id)
         XCTAssertNil(scheduledEnd)
-        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 12)
+        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 13)
         XCTAssertEqual(snapshot.context, """
             Meeting title: Quarterly review
             Calendar: Work
@@ -338,13 +342,87 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertTrue(meetings.isEmpty)
     }
 
+    func testSidebarInfersDropFromTheWholeRow() throws {
+        let folder = SidebarItem(id: UUID(), parentID: nil,
+            folder: .init(name: "Folder", color: nil, expanded: true))
+        let child = SidebarItem(id: UUID(), parentID: folder.id, folder: nil)
+        let meeting = SidebarItem(id: UUID(), parentID: nil, folder: nil)
+        let items = [folder, meeting, child]
+
+        let above = SidebarDropArea(y: 9, height: 40, isFolder: true)
+        XCTAssertEqual(above, .before)
+        XCTAssertEqual(above.destination(on: folder, in: items)?.before, folder.id)
+
+        let inside = SidebarDropArea(y: 23, height: 40, isFolder: true)
+        XCTAssertEqual(inside, .inside)
+        XCTAssertEqual(inside.destination(on: folder, in: items)?.parent, folder.id)
+        XCTAssertNil(inside.destination(on: folder, in: items)?.before)
+
+        let below = SidebarDropArea(y: 31, height: 40, isFolder: true)
+        XCTAssertEqual(below, .after)
+        XCTAssertEqual(below.destination(on: folder, in: items)?.before, child.id)
+
+        XCTAssertEqual(SidebarDropArea(y: 12, height: 40, isFolder: false), .before)
+        let afterMeeting = SidebarDropArea(y: 24, height: 40, isFolder: false)
+        XCTAssertEqual(afterMeeting, .after)
+        let afterMeetingDestination = try XCTUnwrap(afterMeeting.destination(on: meeting, in: items))
+        XCTAssertNil(afterMeetingDestination.parent)
+        XCTAssertNil(afterMeetingDestination.before)
+    }
+
+    func testSidebarOrderSurvivesEditsAndRejectsMovingIntoDescendants() async throws {
+        let url = try temporaryURL()
+        let store = MeetingStore(databaseURL: url)
+        let first = try await store.createMeeting(id: UUID(), name: "First")
+        let second = try await store.createMeeting(id: UUID(), name: "Second")
+        let folder = UUID()
+        let nested = UUID()
+        try await store.createSidebarFolder(folder)
+        try await store.createSidebarFolder(nested)
+        try await store.moveSidebarItem(nested, to: folder, before: nil)
+        try await store.moveSidebarItem(first.id, to: nested, before: nil)
+        try await store.moveSidebarItem(folder, to: nil, before: nil)
+        try await store.renameSidebarFolder(nested, name: "Notes")
+        try await store.setSidebarFolderColor(nested, color: .blue)
+        _ = try await store.renameMeeting(id: second.id, name: "Renamed")
+        let newest = try await store.createMeeting(id: UUID(), name: "Newest")
+        do {
+            try await store.moveSidebarItem(folder, to: nested, before: nil)
+            XCTFail("Expected a folder cycle to be rejected")
+        } catch SidebarMoveError.nestingCycle {}
+
+        let reopened = MeetingStore(databaseURL: url)
+        let items = try await reopened.sidebarItems()
+        XCTAssertEqual(items.filter { $0.parentID == nil }.map(\.id), [newest.id, second.id, folder])
+        XCTAssertEqual(items.first { $0.id == first.id }?.parentID, nested)
+        XCTAssertEqual(items.first { $0.id == nested }?.folder?.name, "Notes")
+        XCTAssertEqual(items.first { $0.id == nested }?.folder?.color, .blue)
+
+        try await reopened.setSidebarFolderExpanded(folder, expanded: false)
+        var layout = try await reopened.sidebarItems()
+        try layout.moveSidebarItem(second.id, to: folder, before: nested)
+        XCTAssertTrue(layout.first { $0.id == folder }?.folder?.expanded == true)
+        XCTAssertThrowsError(try layout.moveSidebarItem(folder, to: nested, before: nil))
+        try await reopened.moveSidebarItem(second.id, to: folder, before: nested)
+        let persisted = try await reopened.sidebarItems()
+        XCTAssertEqual(Dictionary(grouping: layout, by: \.parentID),
+                       Dictionary(grouping: persisted, by: \.parentID))
+
+        try await reopened.deleteMeeting(first.id)
+        let remaining = try await reopened.sidebarItems()
+        XCTAssertFalse(remaining.contains { $0.id == first.id })
+        _ = try await reopened.deleteAllMeetings()
+        let empty = try await reopened.sidebarItems()
+        XCTAssertTrue(empty.isEmpty)
+    }
+
     func testFutureVersionIsPreservedByteForByte() async throws {
         let url = try temporaryURL()
-        try execute("CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES ('preserve'); PRAGMA user_version=13", at: url)
+        try execute("CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES ('preserve'); PRAGMA user_version=14", at: url)
         let original = try Data(contentsOf: url)
         do { _ = try await MeetingStore(databaseURL: url).loadMeetings(); XCTFail("Expected incompatible version") } catch {}
         XCTAssertEqual(try Data(contentsOf: url), original)
-        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 13)
+        XCTAssertEqual(try scalar("PRAGMA user_version", at: url), 14)
     }
 
     func testInitializationFailureRollsBackWithoutChangingExistingSchema() async throws {

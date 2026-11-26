@@ -25,9 +25,11 @@ struct SettingsView: View {
     @Binding var section: SettingsSection?
     @ObservedObject var transcription: TranscriptionCoordinator
     @ObservedObject var recording: RecordingCoordinator
+    @ObservedObject var compression: RecordingCompressionCoordinator
     let deleteAll: () -> Void
     @State private var hasMoreBelow = false
     @State private var confirmingDeleteAll = false
+    @State private var confirmingCompression = false
     @State private var recordingUsage: RecordingStorage.Usage?
     @State private var storageUnavailable = false
     @State private var folderError: String?
@@ -140,6 +142,24 @@ struct SettingsView: View {
                     }
                 }
                 if let folderError { Text(folderError).font(.caption).foregroundStyle(.red) }
+                Divider()
+                Toggle("Automatically Compact New Audio", isOn: Binding(get: { compression.automaticEnabled },
+                                                                         set: compression.setAutomatic))
+                SettingsNote("Compacts new recordings after transcription.")
+                Button("Compact Existing Audio…", systemImage: "archivebox") { confirmingCompression = true }
+                    .disabled(compression.progress != nil)
+                    .confirmationDialog("Compact Existing Audio?", isPresented: $confirmingCompression,
+                                        titleVisibility: .visible) {
+                        Button("Compact Audio") { compression.compactExisting() }
+                    } message: {
+                        Text("Finished transcriptions keep their timestamps. Original audio is replaced with smaller AAC files after validation.")
+                    }
+                if let progress = compression.progress {
+                    ProgressView(progress).controlSize(.small)
+                } else if let result = compression.result {
+                    Text(result).font(.caption).foregroundStyle(.secondary)
+                }
+                Divider()
                 Text("Permanently remove all meetings and their saved recordings, screen captures, transcripts, summaries, and chats from this Mac.")
                     .foregroundStyle(.secondary)
                 Button("Delete All Meeting Data…", role: .destructive) {
@@ -152,7 +172,7 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .task(id: recording.revision) {
+            .task(id: [recording.revision, compression.revision]) {
                 do {
                     let root = try await recording.store.recordingRoot()
                     repeat {

@@ -111,7 +111,13 @@ private struct OpenAIChatClient {
          "parameters": ["type": "object", "properties": [
             "terms": ["type": "array", "items": ["type": "string"]],
             "meetingIDs": ["type": "array", "items": ["type": "string"]]
-         ], "required": ["terms", "meetingIDs"], "additionalProperties": false], "strict": true]
+         ], "required": ["terms", "meetingIDs"], "additionalProperties": false], "strict": true],
+        ["type": "function", "name": "readTranscriptContext", "description": "Read surrounding speech in the same recording around a transcript evidence number from this turn. Each side allows 0 to 180 seconds. Returns numbered excerpts, keeping the nearest passages within the response budget.",
+         "parameters": ["type": "object", "properties": [
+            "evidence": ["type": "integer"],
+            "secondsBefore": ["type": "integer"],
+            "secondsAfter": ["type": "integer"]
+         ], "required": ["evidence", "secondsBefore", "secondsAfter"], "additionalProperties": false], "strict": true]
     ] }
 
     func stream(input: [[String: Any]], instructions: String, thinkLonger: Bool, toolChoice: ToolChoice,
@@ -196,6 +202,15 @@ private actor GPTMeetingTools {
             let meetingIDs = args.meetingIDs.compactMap(UUID.init(uuidString:))
             if !args.meetingIDs.isEmpty && meetingIDs.isEmpty { return "No valid meeting IDs provided." }
             return try await json(transcripts(terms: args.terms, meetingIDs: meetingIDs))
+        case "readTranscriptContext":
+            let args = try JSONDecoder().decode(TranscriptContextArguments.self, from: data)
+            guard args.evidence > 0, args.evidence <= hits.count,
+                  hits[args.evidence - 1].citation.screenCaptureID == nil else {
+                return "Choose a transcript evidence number from this turn."
+            }
+            let context = try await store.chatTranscriptContext(around: hits[args.evidence - 1],
+                secondsBefore: args.secondsBefore, secondsAfter: args.secondsAfter, byteLimit: 7_200)
+            return try json(context.map(transcriptLine))
         default:
             return "Unknown tool."
         }
@@ -207,20 +222,22 @@ private actor GPTMeetingTools {
         for match in matches {
             guard try await store.isChatCitationCurrent(match.citation) else { continue }
             let captures = try await store.screenCaptureEvidence(near: match)
-            for source in [match] + captures {
-                let index: Int
-                if let existing = hits.firstIndex(where: { $0.citation == source.citation }) {
-                    index = existing
-                } else {
-                    index = hits.count
-                    hits.append(source)
-                }
-                sources.insert(source.citation.meetingID)
-                result.append(TranscriptLine(evidence: index + 1, meeting: source.title,
-                    timestamp: source.citation.timestamp, text: source.body))
-            }
+            result.append(contentsOf: ([match] + captures).map(transcriptLine))
         }
         return result
+    }
+
+    private func transcriptLine(_ source: ChatEvidence) -> TranscriptLine {
+        let index: Int
+        if let existing = hits.firstIndex(where: { $0.citation == source.citation }) {
+            index = existing
+        } else {
+            index = hits.count
+            hits.append(source)
+        }
+        sources.insert(source.citation.meetingID)
+        return TranscriptLine(evidence: index + 1, meeting: source.title,
+            timestamp: source.citation.timestamp, text: source.body)
     }
 
     private func date(_ value: String?) -> Date? {
@@ -232,6 +249,12 @@ private actor GPTMeetingTools {
 }
 
 private struct MeetingSearchArguments: Decodable { let terms: [String]; let from: String?; let through: String? }
+private struct TranscriptContextArguments: Decodable {
+    let evidence: Int
+    let secondsBefore: Int
+    let secondsAfter: Int
+}
+
 private struct TranscriptSearchArguments: Decodable { let terms: [String]; let meetingIDs: [String] }
 
 private func json(_ value: some Encodable) throws -> String {

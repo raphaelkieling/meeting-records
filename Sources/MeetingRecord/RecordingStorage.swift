@@ -5,11 +5,11 @@ import Darwin
 final class RecordingFileLock: Sendable {
     private let descriptor: Int32
 
-    init(root: URL) throws {
+    init(root: URL, shared: Bool = false) throws {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let descriptor = Darwin.open(root.appendingPathComponent(".capture-lock").path, O_CREAT | O_RDWR, 0o600)
         guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+        guard flock(descriptor, (shared ? LOCK_SH : LOCK_EX) | LOCK_NB) == 0 else {
             let code = errno
             close(descriptor)
             if code == EWOULDBLOCK { throw RecordingError.alreadyRecording }
@@ -108,7 +108,7 @@ actor RecordingStorage {
         var usage = Usage()
         while let url = files?.nextObject() as? URL {
             try Task.checkCancellation()
-            let isAudio = url.pathExtension == "caf"
+            let isAudio = url.pathExtension == "caf" || url.pathExtension == "m4a"
             let isImage = url.pathExtension == "jpg" && url.deletingLastPathComponent().lastPathComponent == "Screen Captures"
             guard isAudio || isImage else { continue }
             do {

@@ -32,6 +32,69 @@ final class RecordingStorageTests: XCTestCase {
         XCTAssertEqual(bytesAfterDeletion, 0)
     }
 
+    func testCompactionPreservesTimelineAndOriginalsSurviveFailure() async throws {
+        let (store, root, recording) = try await fixture()
+        for (source, rate, channels, offset) in [
+            (AudioSegment.Source.me, 24_000.0, AVAudioChannelCount(1), Int64(0)),
+            (.other, 48_000.0, 2, 125_000_000)
+        ] {
+            let path = "\(recording.meetingID)/\(recording.id)/\(source.rawValue)/\(offset).caf"
+            let url = root.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: rate, channels: channels))
+            let frames = AVAudioFrameCount(rate * 1.1)
+            let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames))
+            buffer.frameLength = frames
+            let samples = try XCTUnwrap(buffer.floatChannelData)
+            for channel in 0..<Int(channels) {
+                for frame in 0..<Int(frames) { samples[channel][frame] = sin(Float(frame) * 0.1) * 0.25 }
+            }
+            let file = try AVAudioFile(forWriting: url, settings: format.settings)
+            try file.write(from: buffer)
+            try await store.registerSegment(AudioSegment(recordingID: recording.id, source: source,
+                startOffset: offset, frameCount: Int64(frames), relativePath: path))
+        }
+        _ = try await store.finalizeRecording(recording.id, endedAt: .now, interrupted: false)
+        let originals = try await store.audioSegments(for: recording.id)
+        _ = try await store.claimTranscript(recording.id, model: .base)
+        for clip in originals {
+            try await store.saveTranscript(clip, result: .init(
+                processedThrough: clip.startOffset + 1_100_000_000, segments: []))
+        }
+        _ = try await store.finishDrainedTranscripts()
+
+        let last = try XCTUnwrap(originals.last)
+        let originalURL = root.appendingPathComponent(last.relativePath)
+        let savedBytes = try Data(contentsOf: originalURL)
+        try Data("invalid audio".utf8).write(to: originalURL)
+        do {
+            try await RecordingCompression.run(store: store, id: recording.id, root: root)
+            XCTFail("Expected the conversion to fail")
+        } catch {}
+        let unchanged = try await store.audioSegments(for: recording.id)
+        XCTAssertEqual(unchanged.map(\.relativePath), originals.map(\.relativePath))
+        XCTAssertTrue(originals.allSatisfy { FileManager.default.fileExists(atPath: root.appendingPathComponent($0.relativePath).path) })
+        try savedBytes.write(to: originalURL)
+
+        let before = try await Task { @MainActor in
+            try await RecordingPlayback.makeComposition(segments: originals, root: root).0.duration.seconds
+        }.value
+        let usageBefore = try await RecordingStorage.usage(at: root)
+        try await RecordingCompression.run(store: store, id: recording.id, root: root)
+        let compressed = try await store.audioSegments(for: recording.id)
+        XCTAssertTrue(compressed.allSatisfy { $0.relativePath.hasSuffix(".m4a") })
+        XCTAssertEqual(compressed.map(\.startOffset), originals.map(\.startOffset))
+        XCTAssertEqual(compressed.map(\.frameCount), originals.map(\.frameCount))
+        XCTAssertEqual(compressed.map(\.source), originals.map(\.source))
+        let after = try await Task { @MainActor in
+            try await RecordingPlayback.makeComposition(segments: compressed, root: root).0.duration.seconds
+        }.value
+        XCTAssertEqual(after, before, accuracy: 0.001)
+        let usageAfter = try await RecordingStorage.usage(at: root)
+        XCTAssertLessThan(usageAfter.audio, usageBefore.audio)
+        XCTAssertTrue(originals.allSatisfy { !FileManager.default.fileExists(atPath: root.appendingPathComponent($0.relativePath).path) })
+    }
+
     func testScreenCaptureReferencesAndStorageFollowRecordingLifecycle() async throws {
         let (store, root, recording) = try await fixture()
         let storage = RecordingStorage(store: store, root: root, recording: recording)

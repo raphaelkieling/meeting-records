@@ -29,6 +29,7 @@ enum MeetingChatRetrieval {
         For questions about what people said, discussed, decided, or agreed to do, check the transcript evidence.
         Use searchMeetings to find candidates by title, date, or keywords in saved summaries. Use summary excerpts to identify likely meetings and useful transcript keywords.
         Choose short topic keywords from the question and conversation context. Call searchTranscript with those keywords and any relevant meeting IDs to verify what happened.
+        When a search excerpt lacks context, call readTranscriptContext with its evidence number to read surrounding speech in chronological order. A good starting window is 60 seconds before and after. Dense windows may return only the nearest passages.
         If no meeting is established, use an empty meetingIDs list to search the full selected scope, even when searchMeetings returned no candidates.
         If the transcript search is empty, retry with a shorter keyword, a likely wording variant, or a broader meeting scope within the user's selection.
         Transcript search can also return numbered screen capture references near matching passages. Cite a capture by its number when it helps the user inspect that moment. Capture references provide timing only.

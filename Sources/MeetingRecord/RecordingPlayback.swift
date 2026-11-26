@@ -9,6 +9,7 @@ final class RecordingPlayback: ObservableObject {
     private var requestID: UUID?
     private var preparation: Task<Void, Never>?
     private var player: AVPlayer?
+    private var audioAccess: RecordingFileLock?
     private var observations = Set<AnyCancellable>()
 
     func toggle(_ recordingID: UUID, store: MeetingStore) {
@@ -26,8 +27,11 @@ final class RecordingPlayback: ObservableObject {
         activeID = recordingID
         preparation = Task { [weak self] in
             do {
-                let segments = try await store.audioSegments(for: recordingID)
                 let root = try await store.recordingRoot()
+                let access = try RecordingFileLock(root: root.appendingPathComponent(".audio-access", isDirectory: true),
+                                                   shared: true)
+                defer { withExtendedLifetime(access) {} }
+                let segments = try await store.audioSegments(for: recordingID)
                 let (composition, mix) = try await Self.makeComposition(segments: segments, root: root)
                 guard let self, requestID == request else { return }
 
@@ -36,6 +40,7 @@ final class RecordingPlayback: ObservableObject {
                 observe(item, request: request)
                 let player = AVPlayer(playerItem: item)
                 self.player = player
+                self.audioAccess = access
                 if startOffset > 0 {
                     await player.seek(to: CMTime(value: startOffset, timescale: 1_000_000_000),
                                       toleranceBefore: .zero, toleranceAfter: .zero)
@@ -55,6 +60,7 @@ final class RecordingPlayback: ObservableObject {
         observations.removeAll()
         player?.pause()
         player = nil
+        audioAccess = nil
         activeID = nil
         error = nil
     }
@@ -143,7 +149,8 @@ final class RecordingPlayback: ObservableObject {
               path.count == 4, path.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." })
         else { throw PlaybackError.unreadable }
 
-        let asset = AVURLAsset(url: root.appendingPathComponent(clip.relativePath))
+        let asset = AVURLAsset(url: root.appendingPathComponent(clip.relativePath),
+            options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
         guard let track = try await asset.loadTracks(withMediaType: .audio).first else {
             throw PlaybackError.unreadable
         }

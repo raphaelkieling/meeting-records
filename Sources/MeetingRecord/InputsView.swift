@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct InputsView: View {
@@ -51,22 +52,10 @@ struct InputsView: View {
                                 .buttonStyle(.link)
                         }
                         ForEach(Array(recordings.enumerated()), id: \.element.id) { index, recording in
-                            VStack(alignment: .leading, spacing: 8) {
-                                card(for: recording, index: index).id(recording.id)
-                                ForEach(captures[recording.id, default: []]) { capture in
-                                    HStack {
-                                        ScreenCaptureThumbnail(capture: capture)
-                                        Spacer()
-                                        Button("Delete Screen Capture", systemImage: "trash") {
-                                            captureRecordingID = recording.id
-                                            captureToDelete = capture
-                                        }
-                                        .labelStyle(.iconOnly)
-                                        .help("Delete Screen Capture")
-                                    }
-                                    .padding(.horizontal, 12)
-                                }
-                            }
+                            card(for: recording, index: index).id(recording.id)
+                        }
+                        if captures.values.contains(where: { !$0.isEmpty }) {
+                            imagesCard(recordings: recordings)
                         }
                     } else {
                         ProgressView().controlSize(.small).accessibilityLabel("Loading inputs")
@@ -208,29 +197,65 @@ struct InputsView: View {
         }
     }
 
+    private func imagesCard(recordings: [Recording]) -> some View {
+        inputCard(title: "Images", icon: "photo.on.rectangle") {
+            ForEach(Array(recordings.enumerated()), id: \.element.id) { index, recording in
+                ForEach(captures[recording.id, default: []]) { capture in
+                    HStack(spacing: 8) {
+                        Button {
+                            if !NSWorkspace.shared.open(capture.url) {
+                                removalError = "Could not open screen capture."
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "photo").foregroundStyle(.secondary)
+                                Text(capture.timestamp).monospacedDigit()
+                                if recordings.count > 1 {
+                                    Text("Recording \(index + 1)").foregroundStyle(.secondary)
+                                }
+                                Spacer(minLength: 8)
+                                Image(systemName: "arrow.up.right").foregroundStyle(.secondary)
+                            }
+                            .font(.callout)
+                            .padding(.vertical, 5)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Open screen capture from recording \(index + 1) at \(capture.timestamp)")
+
+                        Menu {
+                            Button("Delete Screen Capture…", systemImage: "trash", role: .destructive) {
+                                captureRecordingID = recording.id
+                                captureToDelete = capture
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis").frame(minWidth: 24, minHeight: 24)
+                        }
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
+                        .fixedSize()
+                        .accessibilityLabel("Actions for screen capture at \(capture.timestamp)")
+                    }
+                }
+            }
+        } accessory: {
+            EmptyView()
+        }
+    }
+
     private func inputCard<Actions: View>(title: String, icon: String, details: [String],
                                           error: String? = nil, highlighted: Bool = false,
                                           @ViewBuilder actions: () -> Actions) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: icon)
-                .font(.body.weight(.medium))
-                .foregroundStyle(Color.meetingAccent)
-                .frame(width: 34, height: 34)
-                .background(Color.meetingAccent.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.headline)
-                Text(details.joined(separator: " · "))
+        inputCard(title: title, icon: icon, highlighted: highlighted) {
+            Text(details.joined(separator: " · "))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let error {
+                Text(error)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                if let error {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 2)
+        } accessory: {
             Menu(content: actions) {
                 Image(systemName: "ellipsis")
                     .font(.body.weight(.semibold))
@@ -241,6 +266,26 @@ struct InputsView: View {
             .fixedSize()
             .help("Actions for \(title)")
             .accessibilityLabel("Actions for \(title)")
+        }
+    }
+
+    private func inputCard<Content: View, Accessory: View>(title: String, icon: String, highlighted: Bool = false,
+                                                          @ViewBuilder content: () -> Content,
+                                                          @ViewBuilder accessory: () -> Accessory) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon)
+                .font(.body.weight(.medium))
+                .foregroundStyle(Color.meetingAccent)
+                .frame(width: 34, height: 34)
+                .background(Color.meetingAccent.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.headline)
+                content()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 2)
+            accessory()
         }
         .padding(12)
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
