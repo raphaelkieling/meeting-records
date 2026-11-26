@@ -17,6 +17,7 @@ struct InputsView: View {
     @StateObject private var playback = RecordingPlayback()
     @State private var didReveal = false
     @State private var highlightedID: UUID?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var recordings: [Recording]?
     @State private var captures: [UUID: [MeetingScreenCapture]] = [:]
     @State private var captureToDelete: MeetingScreenCapture?
@@ -39,26 +40,30 @@ struct InputsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
                     if let error {
-                        Text(error).foregroundStyle(.red)
+                        Text(error).foregroundStyle(.red).transition(.opacity)
                     } else if let recordings {
-                        if let calendarEventDate {
-                            calendarInput(date: calendarEventDate, calendarName: calendarName ?? "Calendar")
+                        VStack(alignment: .leading, spacing: 8) {
+                            if let calendarEventDate {
+                                calendarInput(date: calendarEventDate, calendarName: calendarName ?? "Calendar")
+                            }
+                            if let error = removalError ?? playback.error {
+                                Text(error).foregroundStyle(.red)
+                            }
+                            if !transcription.isReady, recordings.contains(where: { statuses[$0.id]?.status != .complete }) {
+                                Button("Install a model to transcribe audio", action: openSettings)
+                                    .buttonStyle(.link)
+                            }
+                            ForEach(Array(recordings.enumerated()), id: \.element.id) { index, recording in
+                                card(for: recording, index: index).id(recording.id)
+                            }
+                            if captures.values.contains(where: { !$0.isEmpty }) {
+                                imagesCard(recordings: recordings)
+                            }
                         }
-                        if let error = removalError ?? playback.error {
-                            Text(error).foregroundStyle(.red)
-                        }
-                        if !transcription.isReady, recordings.contains(where: { statuses[$0.id]?.status != .complete }) {
-                            Button("Install a model to transcribe audio", action: openSettings)
-                                .buttonStyle(.link)
-                        }
-                        ForEach(Array(recordings.enumerated()), id: \.element.id) { index, recording in
-                            card(for: recording, index: index).id(recording.id)
-                        }
-                        if captures.values.contains(where: { !$0.isEmpty }) {
-                            imagesCard(recordings: recordings)
-                        }
+                        .transition(.opacity)
                     } else {
                         ProgressView().controlSize(.small).accessibilityLabel("Loading inputs")
+                            .transition(.opacity)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -82,8 +87,10 @@ struct InputsView: View {
                 MeetingEmptyState("No inputs yet.", icon: "tray",
                                   detail: "Record this meeting to add audio.")
                     .offset(y: -20)
+                    .transition(.opacity)
             }
         }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.08), value: recordings != nil || error != nil)
         .confirmationDialog("Remove Recording?", isPresented: Binding(
             get: { pendingRemoval != nil },
             set: { if !$0 { pendingRemoval = nil } }

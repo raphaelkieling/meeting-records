@@ -68,7 +68,7 @@ struct CommandPaletteView: View {
                     Text("Searching transcripts…")
                         .font(.callout).foregroundStyle(.secondary)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity)
                 .padding(.horizontal, 19)
                 .padding(.vertical, 8)
             }

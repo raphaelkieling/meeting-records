@@ -9,6 +9,14 @@
 
 A private, local-first macOS app for recording and transcribing meetings, organizing conversations, and generating AI summaries. Meeting data stays on your Mac in a SQLite library.
 
+![Meeting Record transcribing a meeting during recording, with timestamps and screen captures](docs/screenshots/transcription.png)
+
+| Home | Search | Calendar |
+| --- | --- | --- |
+| [![Home with calendar events and recent meetings](docs/screenshots/home.png)](docs/screenshots/home.png) | [![Search results across meeting titles, labels, and transcripts](docs/screenshots/search.png)](docs/screenshots/search.png) | [![Calendar agenda with events from multiple calendars](docs/screenshots/calendar.png)](docs/screenshots/calendar.png) |
+
+Screenshots use sample meetings, transcripts, and screen captures.
+
 Home and Settings stay above the scrollable Meetings list. Use arrow keys to move focus and Return or Space to select.
 
 Meetings and transcripts are stored in `~/Library/Application Support/MeetingRecord/meetings.sqlite`, with recordings kept alongside the library on your Mac.

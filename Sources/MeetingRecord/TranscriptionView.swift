@@ -185,7 +185,7 @@ struct TranscriptionView: View {
             }
         }
         .opacity(hasLoaded || error != nil ? 1 : 0)
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: hasLoaded || error != nil)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.08), value: hasLoaded || error != nil)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay {
             if error == nil {
@@ -200,7 +200,7 @@ struct TranscriptionView: View {
                 }
             }
         }
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: hasLoaded)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.08), value: hasLoaded)
         .task(id: [recordingRevision, transcription.revision]) {
             do {
                 let inputs = try await store.recordings(for: meetingID, includeActive: true)

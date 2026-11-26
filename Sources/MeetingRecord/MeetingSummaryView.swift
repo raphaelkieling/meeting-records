@@ -66,6 +66,7 @@ struct MeetingSummaryView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: isGenerating)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: summaries.revision)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.08), value: snapshot != nil || loadError != nil)
         .sheet(item: $generationRequest) { request in
             SummaryGenerationSheet(request: request, canGenerate: canGenerate) { prompt in
                 summaries.generate(for: meetingID, model: request.model, prompt: prompt)

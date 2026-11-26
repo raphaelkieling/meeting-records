@@ -11,7 +11,6 @@ struct HomeView: View {
     let retry: () -> Void
     let canRecord: Bool
     let record: () -> Void
-    let openCalendar: (Date?) -> Void
     let canCreateMeeting: Bool
     let createMeeting: (CalendarEventDetails, Date, String) -> Void
 
@@ -32,7 +31,7 @@ struct HomeView: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(!canRecord)
                 }
-                upcomingCard
+                calendarAgenda
                 recentMeetings
                 if meetings != nil && error == nil { libraryStats }
             }
@@ -52,48 +51,54 @@ struct HomeView: View {
         }
     }
 
-    private var upcomingCard: some View {
-        HStack(alignment: .top, spacing: 14) {
-            Image(systemName: "calendar")
-                .font(.title3)
-                .foregroundStyle(Color.meetingAccent)
-                .frame(width: 38, height: 38)
-                .background(Color.meetingAccent.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 5) {
-                if !currentEvents.isEmpty || nextEvent != nil {
-                    ForEach(currentEvents, id: \.self) { event in
-                        calendarEvent(event, label: "In Progress")
+    private var calendarAgenda: some View {
+        let events = currentEvents + (nextEvent.map { [$0] } ?? [])
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("Calendar").font(.headline).accessibilityAddTraits(.isHeader)
+            if events.isEmpty {
+                Text(calendarAvailable ? "No timed events in the next 7 days." : "Connect your agenda from Calendar in the sidebar.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(events, id: \.self) { event in
+                        if event != events.first { Divider().padding(.horizontal, 14) }
+                        calendarEvent(event, isInProgress: currentEvents.contains(event))
                     }
-                    if let nextEvent {
-                        calendarEvent(nextEvent, label: "Up Next")
-                    }
-                } else {
-                    Text("Calendar").font(.headline).accessibilityAddTraits(.isHeader)
-                    Text(calendarAvailable ? "No timed events in the next 7 days." : "Open Calendar to connect your agenda.")
-                        .font(.callout).foregroundStyle(.secondary)
                 }
+                .background(.background.secondary)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
             }
-            Spacer(minLength: 8)
-            Button("Open Calendar", action: { openCalendar(currentEvents.first?.startDate ?? nextEvent?.startDate) })
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
     }
 
-    private func calendarEvent(_ event: EKEvent, label: String) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(label).font(.headline).accessibilityAddTraits(.isHeader)
-            Text(event.meetingDetails.title).font(.title3.weight(.semibold)).lineLimit(2)
-            Text("\(event.startDate.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute())) · \(event.calendar.title)")
-                .font(.callout).foregroundStyle(.secondary)
-            Button("Create Meeting") {
-                createMeeting(event.meetingDetails, event.startDate, event.calendar.title)
+    private func calendarEvent(_ event: EKEvent, isInProgress: Bool) -> some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(event.meetingDetails.title).font(.body.weight(.semibold)).lineLimit(2)
+                    .accessibilityValue(isInProgress ? Text("In progress") : Text(""))
+                Text("\(event.startDate.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute())) · \(event.calendar.title)")
+                    .font(.callout).foregroundStyle(.secondary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                createMeeting(event.meetingDetails, event.startDate, event.calendar.title)
+            } label: {
+                Image(systemName: "plus")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(Color.meetingAccent)
+                    .frame(width: 26, height: 26)
+                    .background(Color.meetingAccent.opacity(0.12), in: Circle())
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.borderless)
             .disabled(!canCreateMeeting)
+            .help("Create Meeting")
+            .accessibilityLabel("Create Meeting")
         }
-        .padding(.bottom, 6)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(isInProgress ? Color.meetingAccent.opacity(0.08) : .clear)
     }
 
     private var recentMeetings: some View {

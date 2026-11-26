@@ -37,6 +37,7 @@ private enum MeetingAction {
 
 struct ContentView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Namespace private var meetingTabSelection
     @State private var searchIndexRevision = 0
     @State private var homeRevision = 0
     @State private var recentMeetings: [Meeting]?
@@ -186,8 +187,6 @@ struct ContentView: View {
                                     .id(meeting.id)
                             }
                         }
-                        .id(activeTab)
-                        .transition(.opacity)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .contentShape(Rectangle())
@@ -226,11 +225,7 @@ struct ContentView: View {
                                  durationError: durationError,
                                  open: { request(.openRecent($0)) },
                                  retry: { homeRevision += 1 }, canRecord: canCreate && recording.state == .idle,
-                                 record: { request(.recordNew) },
-                                 openCalendar: { date in
-                                     calendarFocusDate = date
-                                     request(.navigate(.calendar))
-                                 }, canCreateMeeting: canCreate,
+                                 record: { request(.recordNew) }, canCreateMeeting: canCreate,
                                  createMeeting: createMeetingFromCalendar)
                             .task(id: homeLoadKey) { [key = homeLoadKey] in await loadHome(for: key) }
                     }
@@ -486,9 +481,7 @@ struct ContentView: View {
                 let highlighted = selected && tab == .transcription
                 Button {
                     if tab != .inputs { revealLatestRecording = false }
-                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.06)) {
-                        activeTab = tab
-                    }
+                    activeTab = tab
                 } label: {
                     Label(tab.rawValue, systemImage: tab.icon)
                         .font(.callout.weight(.medium))
@@ -500,6 +493,8 @@ struct ContentView: View {
                                 Capsule()
                                     .fill(highlighted ? Color.meetingAccent : Color(nsColor: .controlBackgroundColor))
                                     .shadow(color: .black.opacity(0.12), radius: 2, y: 1)
+                                    .matchedGeometryEffect(id: "selection", in: meetingTabSelection)
+                                    .transition(.identity)
                             }
                         }
                         .contentShape(Capsule())
@@ -510,6 +505,7 @@ struct ContentView: View {
         }
         .padding(3)
         .background(.quaternary, in: Capsule())
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: activeTab)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Meeting views")
     }

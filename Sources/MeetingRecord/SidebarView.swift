@@ -99,7 +99,7 @@ struct SidebarView: View {
                     .accessibilityLabel("Add Meeting")
                 Button(action: createFolder) { Image(systemName: "folder.badge.plus").frame(width: 24, height: 24) }
                     .buttonStyle(.borderless)
-                    .disabled(!canCreate || changingSidebar || pendingLayoutWrite != nil || folderBeingRenamed != nil)
+                    .disabled(!canCreate || changingSidebar || folderBeingRenamed != nil)
                     .help("Add Folder")
                     .accessibilityLabel("Add Folder")
             }
@@ -258,11 +258,13 @@ struct SidebarView: View {
     }
 
     private func changeSidebar(_ operation: @escaping () async throws -> Void, then: (() -> Void)? = nil) {
-        guard !changingSidebar, pendingLayoutWrite == nil else { return }
+        guard !changingSidebar else { return }
+        let previous = pendingLayoutWrite
         changingSidebar = true
-        sidebarError = nil
         Task {
             defer { changingSidebar = false }
+            await previous?.value
+            sidebarError = nil
             do {
                 try await operation()
                 await refreshSidebar()
@@ -326,7 +328,7 @@ struct SidebarView: View {
 
     private func folderRow(_ item: SidebarItem, folder: SidebarItem.Folder) -> some View {
         let color = folder.color?.folderColor ?? .primary
-        let icon = folder.expanded ? "folder" : "folder.fill"
+        let icon = "folder.fill"
         let target = FocusTarget.folder(item.id)
         return Group {
             if folderBeingRenamed == item.id {
@@ -343,7 +345,8 @@ struct SidebarView: View {
                     toggleFolder(item.id)
                 } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: folder.expanded ? "chevron.down" : "chevron.right")
+                        Image(systemName: "chevron.right")
+                            .rotationEffect(.degrees(folder.expanded ? 90 : 0))
                             .font(.caption2).frame(width: 10).foregroundStyle(.secondary).accessibilityHidden(true)
                         Image(systemName: icon).foregroundStyle(color).accessibilityHidden(true)
                         Text(folder.name).lineLimit(1).foregroundStyle(color)
